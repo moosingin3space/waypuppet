@@ -1,5 +1,8 @@
 [package]
 name = "waypuppet-compositor"
+# `tests/fixture.rs` is a shared module, not a test binary, so the test targets
+# are listed explicitly rather than discovered.
+autotests = false
 description = "The headless Wayland compositor that hosts and drives an application under test."
 authors.workspace = true
 version.workspace = true
@@ -12,6 +15,7 @@ workspace = true
 waypuppet-proto.workspace = true
 
 calloop.workspace = true
+png.workspace = true
 # Feature selection, and the reasoning behind it, lives on the workspace dependency.
 smithay.workspace = true
 thiserror.workspace = true
@@ -23,3 +27,11 @@ tracing.workspace = true
 tempfile = "3"
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+
+[[test]]
+name = "handshake"
+path = "tests/handshake.rs"
+
+[[test]]
+name = "capture"
+path = "tests/capture.rs"

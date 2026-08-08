@@ -13,8 +13,11 @@
 //! enough for a client to connect and map a window; it does not draw anything
 //! yet. See `plans/` for what lands next.
 
-#![forbid(unsafe_code)]
+// Not `forbid`: `render` needs a narrowly scoped exception for smithay's
+// unsafe EGL constructors, and `forbid` cannot be overridden at all. The
+// workspace still denies it, so every use has to be justified in place.
 
+mod render;
 mod state;
 
 use std::{path::PathBuf, time::Duration};
@@ -29,7 +32,10 @@ use smithay::{
 };
 use waypuppet_proto::Size;
 
-pub use crate::state::State;
+pub use crate::{
+    render::{Frame, Renderer},
+    state::State,
+};
 
 /// Anything that can go wrong hosting a session.
 #[derive(Debug, thiserror::Error)]
@@ -44,6 +50,12 @@ pub enum Error {
     /// The compositor could not be set up or could not keep running.
     #[error("compositor error: {0}")]
     Compositor(String),
+    /// Rendering or reading a frame back failed.
+    #[error("render error: {0}")]
+    Render(String),
+    /// Encoding or writing a capture failed.
+    #[error("capture failed: {0}")]
+    Capture(String),
     /// The feature exists in the design but not yet in the code.
     #[error("not implemented yet: {0}")]
     Unimplemented(&'static str),
@@ -122,6 +134,12 @@ pub struct Compositor {
     display: Display<State>,
     state: State,
     socket_name: String,
+    /// Which device to render on, from the config.
+    render_node: Option<PathBuf>,
+    /// Built on first use. Deferring it keeps a session that only needs the
+    /// protocol — a test, a client that never gets captured — working on a
+    /// machine with no usable EGL at all.
+    renderer: Option<Renderer>,
 }
 
 impl Compositor {
@@ -181,6 +199,8 @@ impl Compositor {
             display,
             state,
             socket_name,
+            render_node: config.render_node.clone(),
+            renderer: None,
         })
     }
 
@@ -192,6 +212,65 @@ impl Compositor {
         &self.socket_name
     }
 
+    /// What the compositor currently knows.
+    #[must_use]
+    pub fn state(&self) -> &State {
+        &self.state
+    }
+
+    /// Service the event loop once.
+    ///
+    /// Exposed so a caller can interleave its own work — a test asserting
+    /// between iterations, and eventually the control-socket bridge — without
+    /// handing the whole thread to [`Compositor::run`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Compositor`] if the event loop or client dispatch
+    /// fails.
+    pub fn tick(&mut self, timeout: Duration) -> Result<(), Error> {
+        self.event_loop
+            .dispatch(Some(timeout), &mut self.state)
+            .map_err(|error| Error::Compositor(error.to_string()))?;
+
+        self.display
+            .dispatch_clients(&mut self.state)
+            .map_err(|error| Error::Compositor(error.to_string()))?;
+        self.display
+            .flush_clients()
+            .map_err(|error| Error::Compositor(error.to_string()))?;
+
+        self.state.space.refresh();
+        Ok(())
+    }
+
+    /// Composite the current state and hand back the frame.
+    ///
+    /// Brings the renderer up on first call.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NoRenderDevice`] if EGL cannot be brought up, or
+    /// [`Error::Render`] if compositing or readback fails.
+    pub fn capture(&mut self) -> Result<Frame, Error> {
+        let renderer = match &mut self.renderer {
+            Some(renderer) => renderer,
+            slot @ None => {
+                let renderer = Renderer::new(&self.state.output, self.render_node.as_deref())?;
+                slot.insert(renderer)
+            }
+        };
+
+        let frame = renderer.capture(&self.state.output, &self.state.space)?;
+
+        // Tell clients the frame they committed was presented, so they draw the
+        // next one. A compositor that never sends these makes every animated
+        // client look frozen.
+        self.state.send_frames();
+
+        Ok(frame)
+    }
+
     /// Run until something asks the compositor to stop.
     ///
     /// # Errors
@@ -200,18 +279,7 @@ impl Compositor {
     /// fails.
     pub fn run(&mut self) -> Result<(), Error> {
         while self.state.running {
-            self.event_loop
-                .dispatch(Some(Duration::from_millis(16)), &mut self.state)
-                .map_err(|error| Error::Compositor(error.to_string()))?;
-
-            self.display
-                .dispatch_clients(&mut self.state)
-                .map_err(|error| Error::Compositor(error.to_string()))?;
-            self.display
-                .flush_clients()
-                .map_err(|error| Error::Compositor(error.to_string()))?;
-
-            self.state.space.refresh();
+            self.tick(Duration::from_millis(16))?;
         }
         Ok(())
     }

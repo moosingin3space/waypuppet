@@ -4,7 +4,7 @@
 //! [`State`] is a plain struct holding all of it. Splitting it up fights the
 //! framework; keep it flat.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Duration};
 
 use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
@@ -17,7 +17,7 @@ use smithay::{
         backend::{ClientData, ClientId, DisconnectReason},
         protocol::{wl_buffer::WlBuffer, wl_seat::WlSeat, wl_surface::WlSurface},
     },
-    utils::{Logical, Serial, Size as SmithaySize, Transform},
+    utils::{Clock, Logical, Monotonic, Serial, Size as SmithaySize, Transform},
     wayland::{
         buffer::BufferHandler,
         compositor::{
@@ -101,6 +101,8 @@ pub struct State {
     /// Per-window bookkeeping, keyed by the toplevel's surface.
     pub records: HashMap<WlSurface, Record>,
 
+    /// Monotonic time source for frame callbacks.
+    clock: Clock<Monotonic>,
     /// The output's logical size, which is also every window's size.
     output_size: SmithaySize<i32, Logical>,
     /// Source of the next [`WindowId`].
@@ -174,6 +176,7 @@ impl State {
             output,
             space,
             records: HashMap::new(),
+            clock: Clock::new(),
             output_size,
             next_window_id: 1,
         }
@@ -190,6 +193,20 @@ impl State {
                     .is_some_and(|toplevel| toplevel.wl_surface() == surface)
             })
             .cloned()
+    }
+
+    /// Tell every mapped surface that its last frame was presented.
+    ///
+    /// Clients throttle drawing on these callbacks, so a compositor that never
+    /// sends them gets exactly one frame out of an animated client and then
+    /// nothing.
+    pub fn send_frames(&self) {
+        let now = self.clock.now();
+        for window in self.space.elements() {
+            window.send_frame(&self.output, Duration::from(now), None, |_, _| {
+                Some(self.output.clone())
+            });
+        }
     }
 
     /// Hand out the next window identifier.
