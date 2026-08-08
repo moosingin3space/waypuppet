@@ -200,6 +200,7 @@ fn main() -> ExitCode {
 
     match cli.command {
         Command::Doctor => doctor(cli.json),
+        Command::Serve { size } => serve(&size),
         other => {
             eprintln!(
                 "waypuppet: `{}` is designed but not implemented yet — see CLAUDE.md",
@@ -212,7 +213,7 @@ fn main() -> ExitCode {
 
 /// Report the rendering devices available, or explain their absence.
 fn doctor(json: bool) -> ExitCode {
-    let devices = match waypuppet_host::probe() {
+    let devices = match waypuppet_compositor::probe() {
         Ok(devices) => devices,
         Err(error) => {
             eprintln!("waypuppet: cannot initialise EGL: {error}");
@@ -251,6 +252,46 @@ fn doctor(json: bool) -> ExitCode {
     } else {
         ExitCode::SUCCESS
     }
+}
+
+/// Run the compositor in the foreground.
+fn serve(size: &str) -> ExitCode {
+    let Some(output) = parse_size(size) else {
+        eprintln!("waypuppet: --size wants WIDTHxHEIGHT, got {size:?}");
+        return ExitCode::FAILURE;
+    };
+
+    let config = waypuppet_compositor::Config {
+        output,
+        ..waypuppet_compositor::Config::default()
+    };
+
+    let mut compositor = match waypuppet_compositor::Compositor::new(&config) {
+        Ok(compositor) => compositor,
+        Err(error) => {
+            eprintln!("waypuppet: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // Printed rather than logged: this is the one thing a caller driving the
+    // compositor by hand needs, and it should not depend on the log filter.
+    println!("WAYLAND_DISPLAY={}", compositor.socket_name());
+
+    if let Err(error) = compositor.run() {
+        eprintln!("waypuppet: {error}");
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
+}
+
+/// Parse `WIDTHxHEIGHT`.
+fn parse_size(text: &str) -> Option<waypuppet_proto::Size> {
+    let (width, height) = text.split_once(['x', 'X'])?;
+    Some(waypuppet_proto::Size {
+        width: width.trim().parse().ok()?,
+        height: height.trim().parse().ok()?,
+    })
 }
 
 /// The subcommand's name, for the not-implemented message.

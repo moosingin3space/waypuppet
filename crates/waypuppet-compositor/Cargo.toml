@@ -1,5 +1,5 @@
 [package]
-name = "waypuppet-host"
+name = "waypuppet-compositor"
 description = "The headless Wayland compositor that hosts and drives an application under test."
 authors.workspace = true
 version.workspace = true
@@ -16,3 +16,10 @@ calloop.workspace = true
 smithay.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+# A real Wayland client, to prove the compositor from the outside. Versions
+# match what smithay's `wayland-server` is paired with.
+tempfile = "3"
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }

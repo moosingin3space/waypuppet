@@ -9,7 +9,7 @@ edition.workspace = true
 workspace = true
 
 [dependencies]
-waypuppet-host.workspace = true
+waypuppet-compositor.workspace = true
 waypuppet-proto.workspace = true
 
 clap.workspace = true

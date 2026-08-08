@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/waypuppet", "crates/waypuppet-host", "crates/waypuppet-proto"]
+members = ["crates/waypuppet", "crates/waypuppet-compositor", "crates/waypuppet-proto"]
 
 [workspace.package]
 authors = ["Nathan Moos <moosingin3space@gmail.com>"]
@@ -8,7 +8,7 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace.dependencies]
-waypuppet-host = { path = "crates/waypuppet-host" }
+waypuppet-compositor = { path = "crates/waypuppet-compositor" }
 waypuppet-proto = { path = "crates/waypuppet-proto" }
 
 clap = { version = "4.6", features = ["derive", "env"] }
@@ -41,7 +41,7 @@ tarpc = { version = "0.37", features = [
 # input is synthetic — and neither libinput nor libseat ships in the Flatpak SDK, so the
 # defaults do not even build here.
 #
-# The selection lives on the workspace dependency rather than in waypuppet-host, because
+# The selection lives on the workspace dependency rather than in the compositor crate,
 # cargo forbids a member from turning off default features the workspace left on.
 [workspace.dependencies.smithay]
 version = "0.7"
