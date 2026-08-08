@@ -70,10 +70,10 @@ jobs:
 
 ## What CI cannot check, and what to do about it
 
-The compositor's own tests drive it with `wayland-client` from another thread, which covers
-the protocol but not real toolkits. The failures that matter most — a toolkit that hangs
-because it never got a configure, or refuses to start because a global is missing — only
-show up against a real application.
+The compositor's own tests drive it with a `wayland-client` fixture — the compositor on the
+test's thread, the client on another — which covers the protocol but not real toolkits. The
+failures that matter most, a toolkit that hangs because it never got a configure or refuses
+to start because a global is missing, only show up against a real application.
 
 So the suite should grow a job that runs [example-app](../../example-app) under waypuppet and
 asserts it maps a window and draws something. It is the reason waypuppet exists, and it is

@@ -3,9 +3,12 @@
 How to run your GUI application's tests on a machine with no screen, no desktop session and
 — usually — no GPU.
 
-> **Status:** this describes the intended interface. `waypuppet doctor` works today; the
-> verbs below need [plans 03–05](../plans/) to land. The constraints and the advice are
-> real now, because they come from how the pieces fit rather than from the code.
+> **Status:** partly real. `doctor`, `run`, `ps`, `shot`, `logs`, `kill` and `sessions`
+> work today, so a pipeline that starts an application, screenshots it and uploads the
+> result is possible now. The input verbs and `wait` are still to come
+> ([plans 04–05](../plans/)), so the example below does not run end to end yet. The
+> constraints and the advice are real regardless — they come from how the pieces fit
+> rather than from the code.
 
 ## What CI has to provide
 
@@ -85,9 +88,11 @@ everything that affects rasterisation is pinned:
 - **Pin the size and scale.** `--size 1280x800 --scale 1` on every run, including when you
   regenerate the goldens.
 - **Pin the renderer.** Generate goldens the same way CI will. Since CI is almost certainly
-  software, generate them under software rendering everywhere — `waypuppet run --software`
-  forces it even where a GPU is available. Goldens made on a GPU and checked under llvmpipe
-  will fail, and the diff will look like noise.
+  software, generate them under software rendering everywhere. Goldens made on a GPU and
+  checked under llvmpipe will fail, and the diff will look like noise. waypuppet currently
+  picks hardware when it can and has no flag to force software — that flag is
+  [outstanding](../plans/02-rendering-and-capture.md), and until it exists this is the one
+  piece of this page you cannot actually follow.
 - **Pin your fonts.** waypuppet does not draw your text; your toolkit does, with whatever
   fonts the container has. Install them explicitly rather than inheriting them.
 - **Compare with a tolerance.** Exact equality is achievable within one renderer but brittle
@@ -115,4 +120,10 @@ socket and graphics buffers, so they have to be in the same namespace.
 | 1 | the operation failed — read stderr |
 | 2 | usage error |
 
-`wait` timing out is a failure, not a crash, and says which condition did not hold.
+With one deliberate exception: **`waypuppet run` without `--detach` exits with the *child's*
+status**, so a session composes with anything that already checks exit codes. A test script
+that runs its application under waypuppet gets the application's answer, not waypuppet's.
+
+`wait` timing out is a failure, not a crash, and says which condition did not hold. A
+failure that names a stalled compositor loop is a waypuppet bug, not yours — see
+[CLAUDE.md](../CLAUDE.md).

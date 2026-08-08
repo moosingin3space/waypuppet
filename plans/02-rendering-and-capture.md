@@ -10,7 +10,7 @@ a PNG. This is the capability the whole project exists for.
 
 ## Scope
 
-- Bring up EGL headless: pick a device from `waypuppet_host::probe` — hardware first,
+- Bring up EGL headless: pick a device from `waypuppet_compositor::probe` — hardware first,
   software fallback — build an `EGLDisplay` and `EGLContext` from it, then a
   `GlesRenderer`.
 - A gbm device on the same render node, for allocating the render target and for the
@@ -78,6 +78,11 @@ black. `tests/fixture.rs` is the shared `wl_shm` client both test binaries use.
   renderer's formats, and it is the gate on trying freya.
 - Explicitly exercise the software device, rather than trusting that the fallback works
   because the hardware path does.
+- **A way to force software rendering.** `Config::render_node` can name a device, but
+  nothing on the CLI forces llvmpipe where a GPU exists. Golden-image testing needs it —
+  goldens have to be generated on the same renderer CI will use, and CI is almost always
+  software. [`docs/ci.md`](../docs/ci.md) documents the practice and currently has to admit
+  the flag is missing.
 
 ## What we learned
 

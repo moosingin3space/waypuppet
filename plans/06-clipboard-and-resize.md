@@ -20,10 +20,15 @@ changes size.
 
 ## Protocol additions
 
-`waypuppet_proto::Request` has `Resize` already, but **nothing for the clipboard**. This
-phase adds requests to read and write both selections — roughly `Paste { text }` and
-`Copy`, though the naming should be settled against how it reads at the command line:
-`waypuppet clipboard set 'text'` and `waypuppet clipboard get` are the likely verbs.
+The `Waypuppet` trait has `resize` already, but **nothing for the clipboard**. This phase
+adds methods to read and write both selections, and the naming should be settled against
+how it reads at the command line: `waypuppet clipboard set 'text'` and `waypuppet clipboard
+get` are the likely verbs.
+
+Adding a method means adding a `Command` variant and a handler in `handle_command` too.
+Anything that cannot be answered on the spot — a clipboard read waits on the client to
+write down a pipe — must park its sender rather than block, under the rule in
+[plan 03](03-control-socket.md).
 
 Setting a selection means waypuppet offers a data source to the client, so it needs a MIME
 type list. `text/plain;charset=utf-8` covers the terminal case; do not over-generalise

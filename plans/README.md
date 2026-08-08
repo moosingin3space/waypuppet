@@ -21,11 +21,18 @@ instead.
 | 07 | [Accessibility tree](07-accessibility-tree.md) — semantic selectors | not started |
 | 08 | [Sandbox autonomy](08-sandbox-autonomy.md) — the caller never types `flatpak run` | not started |
 
-Phases 01–03 are the spine: until all three land, nothing is usable end to end. 04 and 05
-are what make it trustworthy rather than merely possible. 06 and 07 are driven by
-[example-app](../../example-app) specifically. 08 is numbered last but not ranked last — it only
+Phases 01–03 were the spine, and they have landed: a session can be started, hosted,
+screenshotted and stopped. What is left of them is listed in each plan's "Still to do".
+
+04 and 05 are what make it trustworthy rather than merely possible — input that settles,
+and waiting on facts instead of sleeping. 06 and 07 are driven by
+[example-app](../../example-app) specifically. 08 is numbered last but not ranked last: it only
 needs 03, and it is what decides whether waypuppet is pleasant to reach for or a thing you
 have to remember how to set up.
+
+The one item that gates trying a real toolkit is not a phase of its own — it is
+`zwp_linux_dmabuf_v1`, in [02](02-rendering-and-capture.md)'s "Still to do". Nothing that
+renders through EGL will draw until it exists.
 
 ## Not planned
 

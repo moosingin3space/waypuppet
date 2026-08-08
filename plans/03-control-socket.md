@@ -142,7 +142,9 @@ deadlock.
   bridge is built for them but nothing parks yet.
 - **`logs --follow` cancellation.** A follower that is killed leaves its long poll to
   expire rather than being cancelled by the dropped connection.
-- Input verbs return `Failure::Unimplemented`, pointing at `plans/`.
+- Input verbs return `Failure::Unimplemented`, pointing at `plans/`. Every designed verb is
+  declared in the CLI so `--help` shows the whole surface, not only the finished part; five
+  of them were dropped by accident when `main.rs` was rewritten and have been put back.
 
 ## Defence 3 is tested now
 

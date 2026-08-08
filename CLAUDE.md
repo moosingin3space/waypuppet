@@ -35,16 +35,18 @@ build it inside.
 
 ```
 crates/
-  waypuppet-proto   # the `Waypuppet` service and its types. No I/O.
-  waypuppet-host    # the compositor and the session it hosts.
-  waypuppet         # the `waypuppet` binary: `serve`, plus every client verb.
+  waypuppet-proto        # the `Waypuppet` service and its types. No I/O.
+  waypuppet-compositor   # the compositor, and the session built around it:
+    src/state.rs         #   protocol handlers and window bookkeeping
+    src/render.rs        #   EGL, offscreen compositing, readback, PNG
+    src/bridge.rs        #   commands, deadlines, the heartbeat
+    src/session.rs       #   compositor thread, child process, RPC server
+  waypuppet              # the `waypuppet` binary: `serve`, plus every client verb.
 ```
 
-"Host" here means the thing hosting the application under test, not the machine anything
-runs on.
-
-The load-bearing seams are the capture path (GLES offscreen render → `ExportMem` →
-PNG) and input injection (CLI verb → seat → client). Expect most complexity there.
+The load-bearing seams are the capture path (GLES offscreen render → `ExportMem` → PNG),
+input injection (CLI verb → seat → client), and the bridge, which is the only place the two
+threads meet.
 
 ## Design decisions
 
@@ -236,6 +238,13 @@ that blocks without ticking reintroduces the bug.
 Wrap tests in `fixture::guarded`, which runs the body under a watchdog and aborts with the
 name of the test and what it was waiting on. It is a backstop for waits the harness does
 not mediate; the harness's own limit is much shorter, so the precise failure normally wins.
+
+**Verify a defence by breaking it.** Anything whose failure mode is a wrong answer rather
+than a crash — the stall diagnosis is the type case, since a version that always blamed the
+application would still fail every call "correctly" — should be checked by mutating the
+code and confirming the test fails. One test written for `Heartbeat` passed against a
+deliberately inverted `diagnose`; it was deleted rather than kept, because a test that
+cannot fail reads as coverage and is worse than none.
 
 ## Current state
 

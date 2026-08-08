@@ -1,7 +1,8 @@
 # 05 — Wait
 
 **Status:** not started
-**Depends on:** [04](04-input.md)
+**Depends on:** [04](04-input.md), which should land the parked-sender pattern this needs in
+bulk
 
 ## Goal
 
@@ -15,9 +16,15 @@ ever needs a `sleep`.
 - Each is answered from bookkeeping the earlier phases already keep — the commit counter
   from 01, the title and `app_id` from 01, the child's exit from 03. If a condition needs
   new state, add it at the point of truth rather than polling for it.
-- Parked calls, using the bridge from phase 03: the handler registers its `oneshot` against
-  the condition and awaits, so a parked `wait` costs a suspended task rather than a stalled
-  compositor. A tokio timer covers the timeout; tarpc's deadline is the backstop behind it.
+- Parked calls, over the bridge phase 03 built. `Commands::ask` is the existing shape: the
+  handler sends a `Command` carrying a `oneshot::Sender` and awaits with a deadline. What is
+  new is that the compositor cannot answer immediately, so `handle_command` has to keep the
+  sender in a registry and answer it when the condition fires. A parked `wait` then costs a
+  suspended task rather than a stalled compositor.
+- **The registry is where defence 2 is either honoured or lost.** A sender must be dropped
+  the moment its condition becomes impossible — the window closed, the client exited — so
+  the call fails at once rather than on its deadline. Dropping it is the answer; nothing
+  else has to be signalled.
 - Conditions are evaluated once when the request arrives, so a `wait` for something already
   true returns immediately rather than waiting for the next change.
 - Timeout is a distinguishable outcome, not an error indistinguishable from a broken
@@ -30,7 +37,9 @@ ever needs a `sleep`.
 - `run --detach` immediately followed by `wait --windows 1` is reliable under repetition —
   run it a few hundred times — including the race where the window maps before the `wait`
   arrives.
-- No sleep appears anywhere in waypuppet's own test suite.
+- No sleep is used for *synchronisation* anywhere in waypuppet's own test suite. Deliberate
+  fault injection is a different thing — `tests/stall.rs` sleeps because sleeping is the
+  fault under test — but a sleep standing in for a condition is a bug.
 
 ## Notes
 
@@ -40,4 +49,7 @@ ever needs a `sleep`.
 - `TitleMatches` needs a regex crate; it is the only place one is required, so weigh that
   against matching on substrings.
 - Watch for the case where a client dies while a `wait` is parked. Every parked request
-  must be answered on client exit, or the caller hangs until its own timeout.
+  must be answered on client exit, or the caller hangs until its own timeout. The unit test
+  `a_dropped_reply_fails_at_once_rather_than_on_the_deadline` in `bridge.rs` is the shape to
+  copy: assert it fails *quickly*, against a long deadline, or the test passes for the wrong
+  reason.

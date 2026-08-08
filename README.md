@@ -114,14 +114,23 @@ Mutating verbs settle before they return: `click` waits for the frame the click 
 
 ## Status
 
-Early, but no longer vapour. A real Wayland client can connect to waypuppet, be configured,
-and map a window; `waypuppet doctor` reports what there is to render with. Nothing is drawn
-yet and nothing can be driven from outside the process — that is the next two phases.
+Early, and honest about which half is which.
 
-[CLAUDE.md] has the architecture, [plans/](plans/) has one file per phase in the order they
-are landing, and [docs/](docs/) covers using waypuppet in CI.
+**Works today.** `waypuppet run` starts a session and hosts a process against a real
+compositor. `ps`, `shot`, `logs`, `kill` and `sessions` answer over the control socket, and
+`shot` produces a real PNG of what the client drew. A client that dies during startup is
+reported with its exit status, how long it lasted, whether it ever mapped a window, and
+everything it wrote — which is the failure this project was started over.
 
-Built to test [example-app], which is why the first things to work will be the ones a terminal
+**Not yet.** Input (`key`, `type`, `click`), `wait`, the clipboard, and the accessibility
+tree. And `zwp_linux_dmabuf_v1`, which matters more than it sounds: anything Skia-backed
+renders through EGL and will not draw without it, so no real toolkit has been hosted yet.
+The transcript at the top of this file is the design, not a recording.
+
+[CLAUDE.md] has the architecture, [plans/](plans/) has one file per phase with its status
+and what it taught us, and [docs/](docs/) covers using waypuppet in CI.
+
+Built to test [example-app], which is why the next things to work are the ones a terminal
 application needs: text input, key repeat, clipboard and resize.
 
 ## Name

@@ -1,7 +1,7 @@
 # 04 — Input
 
 **Status:** not started
-**Depends on:** [03](03-control-socket.md)
+**Depends on:** [03](03-control-socket.md), which landed the bridge these verbs travel over
 
 ## Goal
 
@@ -30,14 +30,25 @@ only once the client has drawn the result.
   to a timeout, before replying. This is the property that makes `click` followed by `shot`
   correct with nothing in between, and it belongs here rather than in every caller.
 
+  This is the first command that cannot be answered inline. `handle_command` currently
+  answers everything on the spot; a settling verb has to hold its `oneshot::Sender` until
+  the commit counter moves, which is the parked-sender pattern [plan 05](05-wait.md) needs
+  in bulk. Build it once, here, and let `wait` reuse it.
+
+  Note that "the client did not draw" is `Failure::NotSettled` — a normal outcome about the
+  application — while "the loop stopped" is `Failure::LoopStalled`. `Commands::ask` already
+  tells them apart via the heartbeat; do not collapse them into one timeout.
+
 ## Done when
 
 - A test client that echoes received input confirms the right keysyms, modifiers and
   button codes arrive, in order.
 - `type 'hello'` into a text field in `example-app-app` shows `hello` in the next capture, with
   no sleep in the test.
-- A settle timeout on a client that draws nothing returns a clear timeout rather than
-  hanging.
+- A settle timeout on a client that draws nothing returns `NotSettled` rather than hanging,
+  and is not confused with a stalled loop.
+- Every parked sender is dropped when its window goes away, so a client that exits
+  mid-settle fails the call at once rather than on its deadline.
 
 ## Notes
 

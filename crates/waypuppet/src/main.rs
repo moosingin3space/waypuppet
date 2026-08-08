@@ -7,7 +7,9 @@
 //! # Status
 //!
 //! `doctor`, `serve`, `run`, `ps`, `shot`, `logs`, `kill` and `sessions` work.
-//! The input verbs are designed but land with a later phase; see `plans/`.
+//! The rest are declared and fail with a message pointing at `plans/`, so
+//! `--help` shows the whole designed surface rather than only the finished
+//! part — the shape is the thing being committed to.
 
 mod client;
 
@@ -137,6 +139,65 @@ enum Command {
         #[arg(long, default_value = "left")]
         button: String,
     },
+
+    /// Move the pointer.
+    Move {
+        /// Horizontal position.
+        x: i32,
+        /// Vertical position.
+        y: i32,
+    },
+
+    /// Scroll by whole wheel clicks.
+    Scroll {
+        /// Horizontal clicks, positive rightwards.
+        #[arg(long, default_value_t = 0, allow_negative_numbers = true)]
+        dx: i32,
+        /// Vertical clicks, positive downwards.
+        #[arg(long, default_value_t = 0, allow_negative_numbers = true)]
+        dy: i32,
+    },
+
+    /// Resize a window, by reconfiguring it the way a real compositor would.
+    Resize {
+        /// The new size, as `WIDTHxHEIGHT`.
+        size: String,
+        /// Which window. Defaults to the focused one.
+        #[arg(long)]
+        window: Option<u32>,
+    },
+
+    /// Block until something is true.
+    ///
+    /// Every condition is a protocol-level fact the session observed, which is
+    /// what makes this different from sleeping and hoping.
+    Wait {
+        /// Wait until at least this many windows are mapped.
+        #[arg(long)]
+        windows: Option<usize>,
+        /// Wait until a window title matches this regular expression.
+        #[arg(long)]
+        title: Option<String>,
+        /// Wait until this many further frames have been committed.
+        #[arg(long)]
+        frames: Option<u32>,
+        /// Wait until no frame has been committed for this many milliseconds.
+        #[arg(long)]
+        idle: Option<u64>,
+        /// Wait until the client exits.
+        #[arg(long)]
+        exit: bool,
+        /// Give up after this many milliseconds.
+        #[arg(long, default_value_t = 5_000)]
+        timeout: u64,
+    },
+
+    /// Print the accessibility tree the application publishes.
+    ///
+    /// A semantic view of the window: roles, names and bounds, rather than
+    /// pixels. Toolkits built on AccessKit — freya among them — publish one
+    /// without being asked.
+    Tree,
 }
 
 fn main() -> ExitCode {
@@ -519,6 +580,11 @@ fn verb(command: &Command) -> &'static str {
         Command::Key { .. } => "key",
         Command::Type { .. } => "type",
         Command::Click { .. } => "click",
+        Command::Move { .. } => "move",
+        Command::Scroll { .. } => "scroll",
+        Command::Resize { .. } => "resize",
+        Command::Wait { .. } => "wait",
+        Command::Tree => "tree",
         Command::Logs { .. } => "logs",
         Command::Sessions => "sessions",
         Command::Kill => "kill",
