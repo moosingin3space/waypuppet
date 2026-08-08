@@ -34,11 +34,20 @@ a PNG. This is the capability the whole project exists for.
 - A `wl_shm` test client that fills its surface with a known colour is hosted, captured,
   and the PNG on disk has the expected dimensions and that colour at its centre. This is
   the end-to-end test the rest of the project leans on, so it is worth building properly.
-- The same works with the software EGL device, so CI without a render node still passes.
-- `example-app-app` produces a capture that visibly contains its terminal grid.
+- The same works with the software EGL device, so a machine with no render node still
+  passes.
+
+Deliberately not a criterion: a real toolkit rendering. `example-app-app` needs more than this
+phase provides, and the first honest attempt at it belongs after input ([04](04-input.md))
+when there is something to do with the window once it appears.
 
 ## Notes
 
+- **`probe` currently reports the card node, not the render node.** On this setup it
+  returns `/dev/dri/card1` and a software device, while `/dev/dri/renderD128` also exists.
+  Card nodes need privileges that render nodes do not, so device selection should prefer a
+  `renderD*` node and fall back to a card node only if there is nothing else. Fix this when
+  wiring EGL up rather than living with it.
 - **`unsafe_code` is denied workspace-wide** and headless EGL setup is the most likely
   place to need a raw handle. Try the safe constructors first; if one is genuinely
   unavoidable, relax the lint at the narrowest possible scope with a comment saying which

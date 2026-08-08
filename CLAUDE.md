@@ -112,6 +112,15 @@ is the whole interface; working out how to make that true is
 [plan 08](plans/08-sandbox-autonomy.md). Anything that pushes container mechanics back onto
 the caller is a bug in waypuppet, not something for them to configure.
 
+### anvil is a reference, not a template
+
+smithay's `anvil` is the compositor to read before writing new protocol handling, but do
+not copy it verbatim. Several of its `unsafe` blocks are structural rather than essential —
+its display dispatch puts `Display` inside a calloop source and reaches back in with an
+unsafe `get_mut`, where registering a clone of the poll fd as a wake-only source and
+dispatching in the run loop is equivalent and safe. anvil also carries XWayland, multiple
+backends and a dozen protocols waypuppet does not want. Take the shape, check the details.
+
 ### Determinism is a feature
 
 Fixed output size, fixed scale, one client, nothing else on the desktop. Anything that
@@ -192,12 +201,17 @@ scope with a comment saying why.
 ## Current state
 
 Working: the workspace, the `Waypuppet` service definition, the full CLI surface (parsing
-and help text), and `waypuppet doctor`, which enumerates EGL devices.
+and help text), `waypuppet doctor`, and — as of plan 01 — a compositor a real Wayland
+client can connect to and map a window on. `waypuppet serve` runs it; `cargo test -p
+waypuppet-compositor` proves it against a `wayland-client` test client.
 
-The compositor itself is not written. **The roadmap lives in [`plans/`](plans/)** — one
-file per phase, in the order they should land, each with its own acceptance criteria.
+Nothing is drawn yet, and nothing can be driven from outside the process.
+
+**The roadmap lives in [`plans/`](plans/)** — one file per phase, in the order they should
+land, each with its own acceptance criteria and, once landed, what it taught us.
 [`plans/README.md`](plans/README.md) is the index and also records what is deliberately out
-of scope.
+of scope. Public documentation lives in [`docs/`](docs/), including how CI works here and
+how a consumer wires waypuppet into theirs.
 
 Keep it that way: plans are working documents that change as reality intrudes, and this
 file is for guidance that outlives them. When a phase lands, update its plan's status and

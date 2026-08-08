@@ -114,9 +114,12 @@ Mutating verbs settle before they return: `click` waits for the frame the click 
 
 ## Status
 
-Early. The workspace, the service definition and the command surface are in place, and
-`waypuppet doctor` works. The compositor itself is being written: [CLAUDE.md] has the
-architecture, and [plans/](plans/) has one file per phase in the order they are landing.
+Early, but no longer vapour. A real Wayland client can connect to waypuppet, be configured,
+and map a window; `waypuppet doctor` reports what there is to render with. Nothing is drawn
+yet and nothing can be driven from outside the process — that is the next two phases.
+
+[CLAUDE.md] has the architecture, [plans/](plans/) has one file per phase in the order they
+are landing, and [docs/](docs/) covers using waypuppet in CI.
 
 Built to test [example-app], which is why the first things to work will be the ones a terminal
 application needs: text input, key repeat, clipboard and resize.
