@@ -66,6 +66,37 @@ This replaces an earlier "one calloop, no async" design. Owning the loop end to 
 simpler, but it meant hand-rolling request framing, correlation, deadlines, cancellation
 and long-polling — reimplementing an RPC library, worse. See "The protocol is a Rust trait".
 
+### Waiting is bounded, and failures say which kind they are
+
+waypuppet cannot promise never to hang. It can promise to explain, and that is the design
+target: **every wait carries a deadline, and every deadline produces an error that names
+what went wrong.**
+
+Three failures look identical from the outside and want different fixes:
+
+| | Failure | Whose bug |
+|---|---|---|
+| **A** | the compositor loop is not being driven | waypuppet's |
+| **B** | waiting for something that can no longer happen | waypuppet's |
+| **C** | the loop is running, the client is not drawing | the application's |
+
+Distinguishing them is worth real effort, because C is a normal outcome — a slow or broken
+application under test, reported as `NotSettled` — while A and B are defects in waypuppet
+that would otherwise hide behind the same "timed out" message. A monotonic tick counter on
+the compositor loop separates them exactly: if it has not advanced, the loop is stuck; if
+it has, the client is.
+
+Two things make this cheap rather than laborious:
+
+- **Structure beats detection.** A dropped `oneshot::Sender` wakes its receiver
+  immediately, so if parked requests are held such that the only way to keep waiting is for
+  someone to keep the sender alive, a compositor thread that dies cancels every outstanding
+  request for free. Tie a parked sender's lifetime to the condition still being *possible*,
+  and B mostly stops existing.
+- **There is no lock cycle to find.** This is not deadlock in the textbook sense, so
+  lock-order detectors have nothing to look at. The wait-for edge is "waiting on somebody
+  else's event loop to run", which no such tool can see. Do not reach for one.
+
 ### The protocol is a Rust trait
 
 `waypuppet_proto::Waypuppet` is a `#[tarpc::service]`, so client and server are checked
@@ -192,11 +223,19 @@ Carried from [example-app](../example-app/CLAUDE.md), the reference for house st
 
 ### Testing a compositor
 
-waypuppet's own tests should not need a GUI application. Write a minimal `wl_shm` client
-that fills its surface with a known colour, host it, capture, and assert on pixels — that
-exercises the whole path end to end and fails legibly. `unsafe_code` is denied, so if
-headless EGL setup turns out to need raw handles, relax the lint at the narrowest possible
-scope with a comment saying why.
+waypuppet's own tests do not need a GUI application. `tests/fixture.rs` is a minimal
+`wl_shm` client that fills its surface with a known colour; the tests host it, capture, and
+assert on pixels, which exercises the whole path end to end and fails legibly.
+
+**Go through `Harness`.** It owns the compositor and the client together, and every method
+on it that waits also ticks. That is not a convenience — it is what makes the hang
+described above unrepresentable, because there is no way to reach a blocking client
+operation except through a call already driving the compositor. Adding a fixture method
+that blocks without ticking reintroduces the bug.
+
+Wrap tests in `fixture::guarded`, which runs the body under a watchdog and aborts with the
+name of the test and what it was waiting on. It is a backstop for waits the harness does
+not mediate; the harness's own limit is much shorter, so the precise failure normally wins.
 
 ## Current state
 

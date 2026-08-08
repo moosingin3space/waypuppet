@@ -33,6 +33,60 @@ is usable, if not yet trustworthy — that is [04](04-input.md) and [05](05-wait
   Without `--detach` it stays in the foreground and exits with the child's status.
 - `sessions` enumerates live sockets in the session directory.
 
+## Deadlock defences
+
+Phase 02 produced a hang in the *test* harness — a client blocking on a compositor nobody
+was ticking. The harness now makes that shape unrepresentable, but the bridge below is the
+same hazard at full scale, with a real client and a real RPC server instead of two threads
+in a test. Build the defences with the bridge, not after it; all three are cheap now and
+awkward to retrofit.
+
+### 1. No unbounded wait, anywhere
+
+Every `recv`, every `.await` on a `oneshot`, every reply the CLI waits for carries a
+deadline. tarpc gives this on the RPC leg; the bridge needs it on the compositor leg too.
+
+This prevents nothing. It converts a hang into a diagnosable failure, which is the whole
+point — a wedged `shot` that fails in five seconds saying why beats one that runs until CI
+gives up. Prefer a helper that takes the deadline over a bare `await`, so the bounded form
+is the easy one to write.
+
+### 2. Let `Drop` do the cancelling
+
+A dropped `oneshot::Sender` wakes its receiver with an error immediately, with no timeout
+and no detection logic. Hold parked requests so that the **only** way to keep waiting is
+for something to keep the sender alive, and tie that lifetime to the condition still being
+possible:
+
+- compositor thread panics → every parked sender drops → every outstanding call fails at
+  once, with a real error rather than a deadline.
+- the client exits → drain the parked-wait registry for conditions that can no longer hold
+  ([`Condition::Frames`], settle-on-frame) → those calls answer immediately.
+
+Get this right and "waiting for something that will never happen" mostly stops being a
+thing that can happen, rather than a thing that eventually times out.
+
+### 3. A heartbeat on the compositor loop
+
+The loop bumps an `AtomicU64` and a timestamp every tick — one relaxed store, no
+measurable cost. Consult it before choosing a timeout's error message:
+
+- the counter advanced → the loop is fine, the client is not drawing → `NotSettled`, which
+  is a **normal** outcome describing the application under test.
+- the counter did not advance → the loop is stuck → a bug in waypuppet, and the error
+  should say so and for how long.
+
+This is a product feature, not test scaffolding. Without it those two cases are the same
+"timed out after 5s" and a user cannot tell whether to debug their application or file a
+waypuppet bug. With it, waypuppet can say *"the compositor loop has not ticked for 3.2s
+while handling `shot`"*, which points straight at the culprit.
+
+### Not worth doing
+
+Lock-order deadlock detectors, `parking_lot`'s included. There is no lock cycle here: the
+wait-for edge is "waiting on an event loop to run", which they cannot represent. The tick
+counter above is the cheap thing that actually observes it.
+
 ## Done when
 
 - `waypuppet run --detach -- ./shm-fixture` followed by `ps`, `shot` and `kill` behaves,
@@ -41,6 +95,9 @@ is usable, if not yet trustworthy — that is [04](04-input.md) and [05](05-wait
   how long it lasted, whether it ever mapped a window, and its captured stderr.
 - Two sessions with different `--session` names run at once without interfering.
 - Killing the CLI mid-call leaves no parked work behind on the server.
+- Killing the *compositor* thread mid-call fails every outstanding call promptly, by
+  dropped sender rather than by deadline.
+- A deliberately stalled loop produces an error naming the stall, not a generic timeout.
 
 ## Notes
 
