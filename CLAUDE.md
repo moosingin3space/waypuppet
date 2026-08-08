@@ -6,7 +6,7 @@ repository.
 ## Project
 
 waypuppet runs a GUI application inside a headless Wayland compositor and exposes it — as
-screenshots, as synthetic input, as an accessibility tree — over a Unix socket and a CLI.
+screenshots, as synthetic input, as an accessibility tree — over an RPC socket and a CLI.
 See [README.md](README.md) for the user-facing pitch.
 
 It exists because an agent working on [example-app](../example-app) could build the app and launch
@@ -25,16 +25,23 @@ build it inside.
   implementations, `desktop::Space`/`Window` for window management, the EGL/GLES backend,
   and the seat with `KeyboardHandle`/`PointerHandle`. Its own `anvil` example is the
   reference compositor; read it before writing new protocol handling.
-- **`calloop` 0.14** — smithay's event loop, and the only one in the process.
+- **`calloop` 0.14** — smithay's event loop, driving the compositor thread.
+- **`tarpc` 0.37** — the control protocol, over a Unix socket framed with bincode. The
+  service is the `Waypuppet` trait in `waypuppet-proto`; deadlines and cancellation come
+  from the framework.
+- **`tokio` 1** — runs the RPC server on its own thread.
 
 ## Workspace layout
 
 ```
 crates/
-  waypuppet-proto   # control-protocol types (serde). No I/O.
+  waypuppet-proto   # the `Waypuppet` service and its types. No I/O.
   waypuppet-host    # the compositor and the session it hosts.
   waypuppet         # the `waypuppet` binary: `serve`, plus every client verb.
 ```
+
+"Host" here means the thing hosting the application under test, not the machine anything
+runs on.
 
 The load-bearing seams are the capture path (GLES offscreen render → `ExportMem` →
 PNG) and input injection (CLI verb → seat → client). Expect most complexity there.
@@ -43,27 +50,44 @@ PNG) and input injection (CLI verb → seat → client). Expect most complexity 
 
 These are the ones that will look arbitrary later, so they are written down.
 
-### No async runtime
+### Two loops, one bridge
 
-calloop drives everything in `waypuppet-host` — the Wayland display, the control socket,
-timers, the child process. There is no tokio anywhere. Mixing an async runtime with
-smithay's callback-driven loop means bridging two schedulers for no benefit, since the
-whole process is one thread servicing one client. The CLI side is plain blocking
-`std::os::unix::net::UnixStream`. Keep it that way; if something seems to need tokio, it
-probably needs a calloop event source instead.
+The compositor thread runs calloop and owns every piece of Wayland state. The control
+thread runs tokio and serves RPC. They meet over an `mpsc` channel of commands, each
+carrying a `oneshot` sender for its reply; the compositor wakes on a calloop channel source
+and never blocks.
+
+The rule that matters: **the compositor loop must never block on a request**, because
+several calls wait on the very client the loop is there to service. Async makes that
+natural rather than delicate — a handler holds its `oneshot` and awaits, so a parked `wait`
+costs a suspended task instead of a stalled compositor.
+
+This replaces an earlier "one calloop, no async" design. Owning the loop end to end looked
+simpler, but it meant hand-rolling request framing, correlation, deadlines, cancellation
+and long-polling — reimplementing an RPC library, worse. See "The protocol is a Rust trait".
+
+### The protocol is a Rust trait
+
+`waypuppet_proto::Waypuppet` is a `#[tarpc::service]`, so client and server are checked
+against one definition and there is no schema in another language and no codegen step.
+Deadlines propagate and a departing client cancels its outstanding work, both of which
+matter because `wait` and `logs` are long-lived by design.
+
+Bincode is not self-describing, so no type on the wire may be a
+`serde_json::Value`-shaped escape hatch — it cannot round-trip. The accessibility tree is
+the obvious temptation; it is `proto::Node`, a real type, and better for it.
 
 ### Captures are paths, not payloads
 
-`Response::Shot` carries a filesystem path, and the image is written as a PNG. Keeping
-bytes out of the protocol keeps every message greppable, and it matches the consumer: a
-coding agent ingests an image by reading a file.
+`Capture` carries a filesystem path and the image is written as a PNG. Keeping pixels out
+of the protocol matches the consumer: a coding agent ingests an image by reading a file.
 
 ### Mutating verbs settle before returning
 
 `click`, `key`, `type`, `resize` and friends do not return the moment the event is sent.
 They return once the client has committed a frame in response, or the settle timeout
 elapses. This is the whole reason waypuppet exists rather than a shell script with
-`sleep 0.5` in it, so it belongs in the host, not in each caller.
+`sleep 0.5` in it, so it belongs in the compositor, not in each caller.
 
 ### smithay features
 
@@ -75,10 +99,18 @@ member from turning off what the workspace left on.
 
 ### CLI first, MCP maybe
 
-The CLI is the product. It composes with shell loops, it prints a path that
-`Read` can ingest directly, and it needs no server lifecycle to manage while developing.
-The control socket is newline-delimited JSON, so an MCP server would be a thin shim over
-the same protocol — write one if the CLI proves awkward in practice, not before.
+The CLI is the product. It composes with shell loops, it prints a path that `Read` can
+ingest directly, and it needs no server lifecycle to manage while developing. An MCP server
+would be another `WaypuppetClient` over the same service — write one if the CLI proves
+awkward in practice, not before.
+
+### The CLI hides the sandbox
+
+A caller should never have to know that waypuppet runs in a container, which flags that
+container needs, or that their application needs the same one. `waypuppet run -- ./my-app`
+is the whole interface; working out how to make that true is
+[plan 08](plans/08-sandbox-autonomy.md). Anything that pushes container mechanics back onto
+the caller is a bug in waypuppet, not something for them to configure.
 
 ### Determinism is a feature
 
@@ -100,19 +132,20 @@ just cli ARGS     # run the binary: `just cli shot -o /tmp/o.png`. No `--`.
 just shell        # interactive shell in the SDK, toolchain active
 ```
 
-Every recipe runs inside the Flatpak SDK — see [Toolchain](#toolchain). For anything
-ad-hoc, including a single test, use `just shell` and run cargo in there.
-
-Do **not** run bare `cargo` on the host; it fails, and the reason is below.
+Every recipe builds inside the Flatpak SDK — see [Toolchain](#toolchain). For anything
+ad-hoc, including a single test, use `just shell` and run cargo in there. Bare `cargo`
+outside the sandbox is unsupported: whether it links depends on what a given machine has
+installed, which is exactly the variable the SDK exists to remove.
 
 ## Toolchain
 
 Two layers, the same split as example-app:
 
 - **The Flatpak SDK** (`org.freedesktop.Sdk//25.08`) supplies *system libraries only* —
-  libwayland-server, EGL, GBM, libdrm and xkbcommon, plus a C toolchain for gbm's
-  bindings. This host has none of them as linkable `-devel` symlinks, and being an
-  rpm-ostree system, installing them means a reboot.
+  libwayland-server, EGL, GBM, libdrm and xkbcommon, plus a C toolchain for gbm's bindings.
+  Pinning them to the SDK means the build does not depend on which distribution a
+  contributor runs, whether its `-devel` packages are installed, or whether installing them
+  is even convenient — on an image-based system it can mean a reboot.
 - **mise** (`mise.toml`) supplies the *toolchain* — `just` and `rust`.
 
 Recipes run mise **inside** the sandbox: the Justfile mounts mise's installs plus the
@@ -121,14 +154,16 @@ for the compiler; the SDK's own rust extension goes unused.
 
 Consequences worth knowing:
 
-- **Bare `cargo` on the host fails** at the link step. This is expected.
-- `CARGO_TARGET_DIR` is `target/flatpak` inside the sandbox, so it never collides with a
-  stray host build.
+- `CARGO_TARGET_DIR` is `target/flatpak` inside the sandbox, so sandbox artifacts never
+  collide with a build done any other way.
 - `--device=dri` is load-bearing: without a render node there is nothing to render with.
   `just doctor` is the fastest way to tell a missing device apart from a missing library.
 - The sandbox deliberately does **not** pass `--socket=wayland`. waypuppet has to work with
   no compositor to nest inside, and developing it that way is how that stays true. `just
   nested` opts back in for side-by-side debugging.
+- This is how waypuppet is *developed*. How a user's application gets the same treatment
+  without having to know any of it is a separate problem —
+  [plan 08](plans/08-sandbox-autonomy.md).
 
 ## Conventions
 
@@ -156,39 +191,19 @@ scope with a comment saying why.
 
 ## Current state
 
-Working: the workspace, the control-protocol types, the full CLI surface (parsing and help
-text), and `waypuppet doctor`, which enumerates EGL devices.
+Working: the workspace, the `Waypuppet` service definition, the full CLI surface (parsing
+and help text), and `waypuppet doctor`, which enumerates EGL devices.
 
-Not written yet, in the order it should land:
+The compositor itself is not written. **The roadmap lives in [`plans/`](plans/)** — one
+file per phase, in the order they should land, each with its own acceptance criteria.
+[`plans/README.md`](plans/README.md) is the index and also records what is deliberately out
+of scope.
 
-1. **The compositor core.** A calloop loop, a `wl_display`, and the globals a client needs
-   to start: `wl_compositor`, `wl_subcompositor`, `wl_shm`, `wl_seat`, `wl_output`,
-   `xdg_shell`. Enough for a client to connect and map a window.
-2. **Rendering and capture.** EGL on the render node picked by `probe`, a `GlesRenderer`
-   bound to an offscreen buffer via `Offscreen::create_buffer`, `Space::render_elements`
-   into it, then `ExportMem::copy_framebuffer` and a PNG write. Add
-   `zwp_linux_dmabuf_v1` here — a Skia-backed client will not render without it.
-3. **The control socket.** A calloop `Generic` source over a `UnixListener`, JSONL in and
-   out, plus process spawning with stdout/stderr capture. This is what makes `run`, `ps`,
-   `shot` and `logs` real.
-4. **Input.** `KeyboardHandle::input` and `PointerHandle` for `key`, `type`, `click`,
-   `move`, `scroll`, with an xkb keymap for chord parsing. Then settle-on-frame, which is
-   what makes them trustworthy.
-5. **`wait`.** The conditions in `waypuppet_proto::Condition`, backed by the commit
-   bookkeeping that step 2 already needs.
-6. **Clipboard and resize.** `wl_data_device` and `zwp_primary_selection`, plus
-   `xdg_toplevel` reconfigure. These are what example-app, a terminal application, will
-   actually exercise.
-7. **The accessibility tree.** Run a session D-Bus, let the client register its AT-SPI
-   tree, and expose it through `tree`. Then selectors — `click --on 'button[name="Save"]'`
-   — which is the point of having it.
-
-Deliberately out of scope for now: XWayland, multiple outputs, video recording,
-touch/gesture input beyond the basics.
+Keep it that way: plans are working documents that change as reality intrudes, and this
+file is for guidance that outlives them. When a phase lands, update its plan's status and
+move anything durable it taught us into "Design decisions" above.
 
 ## Version control
 
-The repo is **colocated git + jj** — `.git` and `.jj` both exist, and the user drives it
-with [jj](https://jj-vcs.github.io). `git status` can look misleading; use `jj log`,
-`jj status`, and `jj diff`. Do not run `git commit` here — it will fight the jj working
-copy.
+If the use has colocated `jj` in this repository (visible with the presence of a `.jj/` directory),
+prefer `jj` for interacting with the repository.
