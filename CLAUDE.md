@@ -239,12 +239,14 @@ not mediate; the harness's own limit is much shorter, so the precise failure nor
 
 ## Current state
 
-Working: the workspace, the `Waypuppet` service definition, the full CLI surface (parsing
-and help text), `waypuppet doctor`, and — as of plan 01 — a compositor a real Wayland
-client can connect to and map a window on. `waypuppet serve` runs it; `cargo test -p
-waypuppet-compositor` proves it against a `wayland-client` test client.
+Working end to end: `waypuppet run` starts a session, hosts a child process against a real
+compositor, and `ps`, `shot`, `logs`, `kill` and `sessions` answer over the control socket.
+A client that dies on startup is reported with its exit status, how long it lasted, whether
+it ever mapped a window, and everything it wrote.
 
-Nothing is drawn yet, and nothing can be driven from outside the process.
+Not yet: input (`key`, `type`, `click`), `wait`, the accessibility tree, and
+`zwp_linux_dmabuf_v1` — without which nothing that renders through EGL will draw, so no
+real toolkit has been hosted yet.
 
 **The roadmap lives in [`plans/`](plans/)** — one file per phase, in the order they should
 land, each with its own acceptance criteria and, once landed, what it taught us.

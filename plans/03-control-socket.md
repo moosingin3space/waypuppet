@@ -1,6 +1,6 @@
 # 03 — Control socket
 
-**Status:** not started
+**Status:** mostly done — `wait`, `--follow` cancellation and the stall test remain
 **Depends on:** [02](02-rendering-and-capture.md)
 
 ## Goal
@@ -107,3 +107,55 @@ counter above is the cheap thing that actually observes it.
   plenty; do not reach for the multi-threaded scheduler out of habit.
 - Resist putting Wayland state behind a mutex so handlers can touch it directly. The
   channel is not ceremony — it is what keeps "who may touch compositor state" answerable.
+
+## What landed
+
+`bridge.rs` — `Command`, `Commands`, `Heartbeat`. `Commands::ask` is the only way to reach
+the compositor and it always takes a deadline, so defence 1 is structural rather than a
+habit. `session.rs` — the compositor thread, the child process with captured output, the
+tarpc server, stale-socket reclaim. The CLI gained `serve`, `run` (with `--detach`), `ps`,
+`shot`, `logs`, `kill` and `sessions`.
+
+Verified by hand, end to end:
+
+```
+$ waypuppet run --size 400x300 -- ./fail.sh
+session: client exited 3 after 2ms without mapping a window
+--- stdout ---
+out-line
+--- stderr ---
+err-line
+$ echo $?
+3
+```
+
+That is the diagnostic from the README, and the failure this whole project was started
+over. The detached path works too: `run --detach`, `sessions`, `ps`, `shot` (a real PNG at
+the reported path), `kill`, and the socket is gone afterwards.
+
+`tests/control.rs` covers the same ground over the wire, which is the half that can
+deadlock.
+
+## Still to do
+
+- **`wait`** — [plan 05](05-wait.md), which is where parked calls actually appear. The
+  bridge is built for them but nothing parks yet.
+- **`logs --follow` cancellation.** A follower that is killed leaves its long poll to
+  expire rather than being cancelled by the dropped connection.
+- **A test for the stall diagnosis.** `Heartbeat::diagnose` is written and unexercised;
+  there is no way to stall the loop on purpose yet. Do not trust it until there is.
+- Input verbs return `Failure::Unimplemented`, pointing at `plans/`.
+
+## What we learned
+
+- **`Option<Option<i32>>` is a smell clippy catches, and it was right.** "No child" and
+  "child exited by signal" are different states, and squashing them into nested options
+  made `client_state` hard to read. A three-variant `Life` enum says what it means.
+- **`logs` needed "no more output is coming", not "the child exited".** Treating only the
+  latter as done made a childless session block for the whole five-second poll window
+  before answering emptily — the control test took 5.07s. It now takes 0.07s. A long poll's
+  terminating condition is easy to get subtly wrong in the direction of "works, but slowly",
+  which no assertion catches.
+- **The compositor thread ending is the cancellation.** Falling out of `run()` drops every
+  `oneshot::Sender` it held, so outstanding calls fail immediately rather than on their
+  deadlines. Defence 2 needed no code at all beyond structuring it that way.
