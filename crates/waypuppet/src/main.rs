@@ -6,14 +6,16 @@
 //!
 //! # Status
 //!
-//! The command surface below is the design, and it compiles, but only `doctor`
-//! does anything yet. See `CLAUDE.md` for the roadmap.
+//! `doctor`, `serve`, `run`, `ps`, `shot`, `logs`, `kill` and `sessions` work.
+//! The input verbs are designed but land with a later phase; see `plans/`.
 
-#![forbid(unsafe_code)]
+mod client;
 
-use std::{path::PathBuf, process::ExitCode};
+use std::{path::Path, path::PathBuf, process::ExitCode, time::Duration};
 
 use clap::{Parser, Subcommand};
+use waypuppet_compositor::session;
+use waypuppet_proto::{ClientState, Cursor, Size, Target, WindowId};
 
 /// Run a GUI application inside a headless compositor, then look at it and
 /// drive it.
@@ -81,6 +83,38 @@ enum Command {
         output: Option<PathBuf>,
     },
 
+    /// Print what the client wrote to stdout and stderr.
+    Logs {
+        /// Keep printing as more arrives, until the client exits.
+        #[arg(long, short)]
+        follow: bool,
+    },
+
+    /// List running sessions.
+    Sessions,
+
+    /// Stop the client and shut the session down.
+    Kill,
+
+    /// Run a session in the foreground, serving a control socket.
+    ///
+    /// `run` starts this for you. Reach for it directly when you want the
+    /// compositor's own logs on your terminal.
+    Serve {
+        /// Output size, as `WIDTHxHEIGHT`.
+        #[arg(long, default_value = "1280x800")]
+        size: String,
+        /// Output scale factor.
+        #[arg(long, default_value_t = 1.0)]
+        scale: f64,
+        /// Exit when the spawned command does.
+        #[arg(long)]
+        exit_with_child: bool,
+        /// An optional command to run inside the session.
+        #[arg(last = true)]
+        argv: Vec<String>,
+    },
+
     /// Send key chords, such as `ctrl+c`, `Return` or `F5`.
     Key {
         /// Chords to send, in order.
@@ -94,14 +128,6 @@ enum Command {
         text: String,
     },
 
-    /// Move the pointer.
-    Move {
-        /// Horizontal position.
-        x: i32,
-        /// Vertical position.
-        y: i32,
-    },
-
     /// Click a pointer button, optionally moving there first.
     Click {
         /// Where to click, as `X,Y`. The pointer stays put if omitted.
@@ -110,80 +136,6 @@ enum Command {
         /// Which button.
         #[arg(long, default_value = "left")]
         button: String,
-    },
-
-    /// Scroll by whole wheel clicks.
-    Scroll {
-        /// Horizontal clicks, positive rightwards.
-        #[arg(long, default_value_t = 0, allow_negative_numbers = true)]
-        dx: i32,
-        /// Vertical clicks, positive downwards.
-        #[arg(long, default_value_t = 0, allow_negative_numbers = true)]
-        dy: i32,
-    },
-
-    /// Resize a window, by reconfiguring it the way a real compositor would.
-    Resize {
-        /// The new size, as `WIDTHxHEIGHT`.
-        size: String,
-        /// Which window. Defaults to the focused one.
-        #[arg(long)]
-        window: Option<u32>,
-    },
-
-    /// Block until something is true.
-    ///
-    /// Every condition is a protocol-level fact the session observed, which is
-    /// what makes this different from sleeping and hoping.
-    Wait {
-        /// Wait until at least this many windows are mapped.
-        #[arg(long)]
-        windows: Option<usize>,
-        /// Wait until a window title matches this regular expression.
-        #[arg(long)]
-        title: Option<String>,
-        /// Wait until this many further frames have been committed.
-        #[arg(long)]
-        frames: Option<u32>,
-        /// Wait until no frame has been committed for this many milliseconds.
-        #[arg(long)]
-        idle: Option<u64>,
-        /// Wait until the client exits.
-        #[arg(long)]
-        exit: bool,
-        /// Give up after this many milliseconds.
-        #[arg(long, default_value_t = 5_000)]
-        timeout: u64,
-    },
-
-    /// Print the accessibility tree the application publishes.
-    ///
-    /// A semantic view of the window: roles, names and bounds, rather than
-    /// pixels. Toolkits built on AccessKit — freya among them — publish one
-    /// without being asked.
-    Tree,
-
-    /// Print what the client wrote to stdout and stderr.
-    Logs {
-        /// Keep printing as more arrives.
-        #[arg(long, short)]
-        follow: bool,
-    },
-
-    /// List running sessions.
-    Sessions,
-
-    /// Stop the client and shut the session down.
-    Kill,
-
-    /// Run the compositor in the foreground, serving a control socket.
-    ///
-    /// `run` starts this for you. Reach for it directly when you want the
-    /// compositor's own logs on your terminal.
-    Serve {
-        /// Output size, as `WIDTHxHEIGHT`.
-        #[arg(long, default_value = "1280x800")]
-        size: String,
     },
 }
 
@@ -198,17 +150,300 @@ fn main() -> ExitCode {
 
     let cli = Cli::parse();
 
-    match cli.command {
-        Command::Doctor => doctor(cli.json),
-        Command::Serve { size } => serve(&size),
-        other => {
-            eprintln!(
-                "waypuppet: `{}` is designed but not implemented yet — see CLAUDE.md",
-                verb(&other)
-            );
+    if matches!(cli.command, Command::Doctor) {
+        return doctor(cli.json);
+    }
+
+    // A CLI verb is one short-lived call, and a session's compositor has its own
+    // thread, so neither role needs the multi-threaded scheduler.
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("waypuppet: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    runtime.block_on(dispatch(cli))
+}
+
+/// Run whichever verb was asked for.
+async fn dispatch(cli: Cli) -> ExitCode {
+    let socket = match session::socket_path(&cli.session) {
+        Ok(socket) => socket,
+        Err(error) => {
+            eprintln!("waypuppet: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let outcome = match cli.command {
+        Command::Doctor => return doctor(cli.json),
+        Command::Serve {
+            size,
+            scale,
+            exit_with_child,
+            argv,
+        } => serve(&socket, &size, scale, &argv, exit_with_child).await,
+        Command::Run {
+            size,
+            scale,
+            detach,
+            argv,
+        } => run(&cli.session, &socket, &size, scale, &argv, detach).await,
+        Command::Ps => ps(&socket, cli.json).await,
+        Command::Shot { window, output } => shot(&socket, window, output, cli.json).await,
+        Command::Logs { follow } => logs(&socket, follow).await,
+        Command::Sessions => sessions().await,
+        Command::Kill => kill(&socket).await,
+        ref other => Err(format!(
+            "`{}` is designed but not implemented yet — see plans/",
+            verb(other)
+        )),
+    };
+
+    match outcome {
+        Ok(code) => code,
+        Err(message) => {
+            eprintln!("waypuppet: {message}");
             ExitCode::FAILURE
         }
     }
+}
+
+/// Run a session in this process.
+async fn serve(
+    socket: &Path,
+    size: &str,
+    scale: f64,
+    argv: &[String],
+    exit_with_child: bool,
+) -> Result<ExitCode, String> {
+    let config = config(size, scale)?;
+    let exit = session::serve(&config, socket, argv, exit_with_child)
+        .await
+        .map_err(|error| error.to_string())?;
+
+    // Exit with the child's status, so a session composes with anything that
+    // checks exit codes.
+    Ok(exit.map_or(ExitCode::SUCCESS, |code| {
+        ExitCode::from(u8::try_from(code).unwrap_or(1))
+    }))
+}
+
+/// Start a session, in this process or the background.
+async fn run(
+    name: &str,
+    socket: &Path,
+    size: &str,
+    scale: f64,
+    argv: &[String],
+    detach: bool,
+) -> Result<ExitCode, String> {
+    if !detach {
+        return serve(socket, size, scale, argv, true).await;
+    }
+
+    // Detaching re-executes this binary as a session, rather than forking, so
+    // there is one code path for how a session starts.
+    let exe = std::env::current_exe().map_err(|error| error.to_string())?;
+    let mut command = std::process::Command::new(exe);
+    command
+        .arg("--session")
+        .arg(name)
+        .arg("serve")
+        .arg("--size")
+        .arg(size)
+        .arg("--scale")
+        .arg(scale.to_string())
+        .stdin(std::process::Stdio::null());
+    if !argv.is_empty() {
+        command.arg("--").args(argv);
+    }
+    command.spawn().map_err(|error| error.to_string())?;
+
+    // Poll rather than sleep a guessed interval: the process is up before the
+    // socket is, and how long that takes depends on the machine.
+    client::wait_for_socket(socket, Duration::from_secs(30)).await?;
+    println!("session {name} started");
+    Ok(ExitCode::SUCCESS)
+}
+
+/// List the session's windows.
+async fn ps(socket: &Path, json: bool) -> Result<ExitCode, String> {
+    let session = client::connect(socket).await?;
+    let status = session
+        .status(client::deadline(client::DEADLINE))
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|failure| failure.to_string())?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&status).map_err(|error| error.to_string())?
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let client_state = match &status.client {
+        ClientState::Starting => "starting".to_owned(),
+        ClientState::Running => "running".to_owned(),
+        ClientState::Exited { code } => code.map_or_else(
+            || "exited (signal)".to_owned(),
+            |code| format!("exited {code}"),
+        ),
+    };
+    println!(
+        "output {}x{} scale {}  client {client_state}",
+        status.output.width, status.output.height, status.scale
+    );
+
+    if status.windows.is_empty() {
+        println!("no windows");
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    println!(
+        "{:<4}{:<24}{:<20}{:<18}FRAMES",
+        "ID", "TITLE", "APP_ID", "GEOMETRY"
+    );
+    for window in &status.windows {
+        let geometry = format!(
+            "{},{} {}x{}",
+            window.geometry.origin.x,
+            window.geometry.origin.y,
+            window.geometry.size.width,
+            window.geometry.size.height
+        );
+        println!(
+            "{:<4}{:<24}{:<20}{:<18}{}",
+            window.id.0,
+            window.title.as_deref().unwrap_or("-"),
+            window.app_id.as_deref().unwrap_or("-"),
+            geometry,
+            window.frames
+        );
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Capture the session.
+async fn shot(
+    socket: &Path,
+    window: Option<u32>,
+    output: Option<PathBuf>,
+    json: bool,
+) -> Result<ExitCode, String> {
+    let session = client::connect(socket).await?;
+    let target = window.map_or(Target::Output, |id| Target::Window(WindowId(id)));
+
+    // Made absolute, because the path is printed for something else to open and
+    // a relative one would be ambiguous about whose working directory it means.
+    let output = match output {
+        Some(path) if path.is_absolute() => Some(path),
+        Some(path) => Some(
+            std::env::current_dir()
+                .map_err(|error| error.to_string())?
+                .join(path),
+        ),
+        None => None,
+    };
+
+    let capture = session
+        .shot(client::deadline(client::DEADLINE), target, output)
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|failure| failure.to_string())?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&capture).map_err(|error| error.to_string())?
+        );
+    } else {
+        println!(
+            "{}\t{}x{}",
+            capture.path.display(),
+            capture.size.width,
+            capture.size.height
+        );
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Print the client's output.
+async fn logs(socket: &Path, follow: bool) -> Result<ExitCode, String> {
+    use std::io::Write as _;
+
+    let session = client::connect(socket).await?;
+    let mut cursor = Cursor::default();
+
+    loop {
+        let chunk = session
+            .logs(client::deadline(client::DEADLINE), cursor)
+            .await
+            .map_err(|error| error.to_string())?
+            .map_err(|failure| failure.to_string())?;
+
+        print!("{}", chunk.stdout);
+        eprint!("{}", chunk.stderr);
+        let _ = std::io::stdout().flush();
+        cursor = chunk.cursor;
+
+        if !follow || chunk.done {
+            return Ok(ExitCode::SUCCESS);
+        }
+    }
+}
+
+/// Stop the session.
+async fn kill(socket: &Path) -> Result<ExitCode, String> {
+    let session = client::connect(socket).await?;
+    session
+        .kill(client::deadline(client::DEADLINE))
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|failure| failure.to_string())?;
+    Ok(ExitCode::SUCCESS)
+}
+
+/// List sessions that are actually listening.
+async fn sessions() -> Result<ExitCode, String> {
+    let directory = session::socket_path("any")
+        .map_err(|error| error.to_string())?
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or("no session directory")?;
+
+    let Ok(entries) = std::fs::read_dir(&directory) else {
+        println!("no sessions");
+        return Ok(ExitCode::SUCCESS);
+    };
+
+    let mut found = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|extension| extension != "sock") {
+            continue;
+        }
+        // A socket file proves nothing — a crashed session leaves one behind.
+        // Connecting is the only way to tell a live session from a corpse.
+        if let (Ok(_), Some(name)) = (
+            tokio::net::UnixStream::connect(&path).await,
+            path.file_stem(),
+        ) {
+            println!("{}", name.to_string_lossy());
+            found += 1;
+        }
+    }
+    if found == 0 {
+        println!("no sessions");
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Report the rendering devices available, or explain their absence.
@@ -254,41 +489,21 @@ fn doctor(json: bool) -> ExitCode {
     }
 }
 
-/// Run the compositor in the foreground.
-fn serve(size: &str) -> ExitCode {
-    let Some(output) = parse_size(size) else {
-        eprintln!("waypuppet: --size wants WIDTHxHEIGHT, got {size:?}");
-        return ExitCode::FAILURE;
-    };
-
-    let config = waypuppet_compositor::Config {
+/// Build a session config from the command line.
+fn config(size: &str, scale: f64) -> Result<waypuppet_compositor::Config, String> {
+    let output =
+        parse_size(size).ok_or_else(|| format!("--size wants WIDTHxHEIGHT, got {size:?}"))?;
+    Ok(waypuppet_compositor::Config {
         output,
+        scale,
         ..waypuppet_compositor::Config::default()
-    };
-
-    let mut compositor = match waypuppet_compositor::Compositor::new(&config) {
-        Ok(compositor) => compositor,
-        Err(error) => {
-            eprintln!("waypuppet: {error}");
-            return ExitCode::FAILURE;
-        }
-    };
-
-    // Printed rather than logged: this is the one thing a caller driving the
-    // compositor by hand needs, and it should not depend on the log filter.
-    println!("WAYLAND_DISPLAY={}", compositor.socket_name());
-
-    if let Err(error) = compositor.run() {
-        eprintln!("waypuppet: {error}");
-        return ExitCode::FAILURE;
-    }
-    ExitCode::SUCCESS
+    })
 }
 
 /// Parse `WIDTHxHEIGHT`.
-fn parse_size(text: &str) -> Option<waypuppet_proto::Size> {
+fn parse_size(text: &str) -> Option<Size> {
     let (width, height) = text.split_once(['x', 'X'])?;
-    Some(waypuppet_proto::Size {
+    Some(Size {
         width: width.trim().parse().ok()?,
         height: height.trim().parse().ok()?,
     })
@@ -303,12 +518,7 @@ fn verb(command: &Command) -> &'static str {
         Command::Shot { .. } => "shot",
         Command::Key { .. } => "key",
         Command::Type { .. } => "type",
-        Command::Move { .. } => "move",
         Command::Click { .. } => "click",
-        Command::Scroll { .. } => "scroll",
-        Command::Resize { .. } => "resize",
-        Command::Wait { .. } => "wait",
-        Command::Tree => "tree",
         Command::Logs { .. } => "logs",
         Command::Sessions => "sessions",
         Command::Kill => "kill",

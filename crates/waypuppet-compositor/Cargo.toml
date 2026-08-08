@@ -15,7 +15,10 @@ workspace = true
 waypuppet-proto.workspace = true
 
 calloop.workspace = true
+futures.workspace = true
 png.workspace = true
+tarpc.workspace = true
+tokio.workspace = true
 # Feature selection, and the reasoning behind it, lives on the workspace dependency.
 smithay.workspace = true
 thiserror.workspace = true
@@ -35,3 +38,7 @@ path = "tests/handshake.rs"
 [[test]]
 name = "capture"
 path = "tests/capture.rs"
+
+[[test]]
+name = "control"
+path = "tests/control.rs"

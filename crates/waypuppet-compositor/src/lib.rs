@@ -17,15 +17,17 @@
 // unsafe EGL constructors, and `forbid` cannot be overridden at all. The
 // workspace still denies it, so every use has to be justified in place.
 
+pub mod bridge;
 mod render;
+pub mod session;
 mod state;
 
-use std::{path::PathBuf, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use smithay::{
     backend::egl::EGLDevice,
     reexports::{
-        calloop::{EventLoop, Interest, Mode, PostAction, generic::Generic},
+        calloop::{EventLoop, Interest, Mode, PostAction, generic::Generic, ping::make_ping},
         wayland_server::Display,
     },
     wayland::socket::ListeningSocketSource,
@@ -33,6 +35,7 @@ use smithay::{
 use waypuppet_proto::Size;
 
 pub use crate::{
+    bridge::{Command, Commands, Heartbeat, Snapshot},
     render::{Frame, Renderer},
     state::State,
 };
@@ -134,12 +137,12 @@ pub struct Compositor {
     display: Display<State>,
     state: State,
     socket_name: String,
-    /// Which device to render on, from the config.
-    render_node: Option<PathBuf>,
-    /// Built on first use. Deferring it keeps a session that only needs the
-    /// protocol — a test, a client that never gets captured — working on a
-    /// machine with no usable EGL at all.
-    renderer: Option<Renderer>,
+    /// The control thread's end of the bridge, handed out by
+    /// [`Compositor::commands`].
+    commands: Commands,
+    /// Bumped every iteration, so a stalled loop is distinguishable from a
+    /// client that is simply not drawing.
+    heartbeat: Arc<Heartbeat>,
 }
 
 impl Compositor {
@@ -165,10 +168,8 @@ impl Compositor {
         let handle = event_loop.handle();
         handle
             .insert_source(socket, |stream, (), state: &mut State| {
-                if let Err(error) = state
-                    .display_handle
-                    .insert_client(stream, std::sync::Arc::new(state::ClientState::default()))
-                {
+                let data = std::sync::Arc::new(state.new_client_state());
+                if let Err(error) = state.display_handle.insert_client(stream, data) {
                     tracing::warn!(%error, "could not add wayland client");
                 }
             })
@@ -194,14 +195,44 @@ impl Compositor {
             )
             .map_err(|error| Error::Compositor(error.to_string()))?;
 
+        // The bridge. A ping wakes the loop when a command is queued; without
+        // it the command would sit in the queue until the loop happened to wake
+        // for some other reason, which is a latency bug that looks like a hang.
+        let heartbeat = Arc::new(Heartbeat::new());
+        let (ping, ping_source) =
+            make_ping().map_err(|error| Error::Compositor(error.to_string()))?;
+        let (commands, mut receiver) = Commands::new(ping, Arc::clone(&heartbeat));
+
+        handle
+            .insert_source(ping_source, move |(), (), state: &mut State| {
+                // Drain rather than handle one: several commands may have been
+                // queued between wake-ups, and a ping does not count them.
+                while let Ok(command) = receiver.try_recv() {
+                    handle_command(state, command);
+                }
+            })
+            .map_err(|error| Error::Compositor(error.to_string()))?;
+
         Ok(Self {
             event_loop,
             display,
             state,
             socket_name,
-            render_node: config.render_node.clone(),
-            renderer: None,
+            commands,
+            heartbeat,
         })
+    }
+
+    /// The control thread's end of the bridge.
+    #[must_use]
+    pub fn commands(&self) -> Commands {
+        self.commands.clone()
+    }
+
+    /// The compositor's liveness signal.
+    #[must_use]
+    pub fn heartbeat(&self) -> Arc<Heartbeat> {
+        Arc::clone(&self.heartbeat)
     }
 
     /// The name of the Wayland socket clients should connect to.
@@ -241,34 +272,18 @@ impl Compositor {
             .map_err(|error| Error::Compositor(error.to_string()))?;
 
         self.state.space.refresh();
+        self.heartbeat.beat();
         Ok(())
     }
 
     /// Composite the current state and hand back the frame.
-    ///
-    /// Brings the renderer up on first call.
     ///
     /// # Errors
     ///
     /// Returns [`Error::NoRenderDevice`] if EGL cannot be brought up, or
     /// [`Error::Render`] if compositing or readback fails.
     pub fn capture(&mut self) -> Result<Frame, Error> {
-        let renderer = match &mut self.renderer {
-            Some(renderer) => renderer,
-            slot @ None => {
-                let renderer = Renderer::new(&self.state.output, self.render_node.as_deref())?;
-                slot.insert(renderer)
-            }
-        };
-
-        let frame = renderer.capture(&self.state.output, &self.state.space)?;
-
-        // Tell clients the frame they committed was presented, so they draw the
-        // next one. A compositor that never sends these makes every animated
-        // client look frozen.
-        self.state.send_frames();
-
-        Ok(frame)
+        self.state.capture()
     }
 
     /// Run until something asks the compositor to stop.
@@ -282,5 +297,24 @@ impl Compositor {
             self.tick(Duration::from_millis(16))?;
         }
         Ok(())
+    }
+}
+
+/// Answer one command from the control thread.
+///
+/// Everything here is immediate. A command that cannot be answered on the spot
+/// must park its sender somewhere the loop can reach later — never block, since
+/// the loop is what the caller is usually waiting on.
+fn handle_command(state: &mut State, command: Command) {
+    match command {
+        Command::Status(reply) => {
+            // A closed receiver means the caller gave up. Nothing to do about
+            // it, and nothing worth logging.
+            let _ = reply.send(state.snapshot());
+        }
+        Command::Capture(reply) => {
+            let _ = reply.send(state.capture().map_err(|error| error.to_string()));
+        }
+        Command::Stop => state.running = false,
     }
 }

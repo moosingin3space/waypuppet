@@ -4,7 +4,15 @@
 //! [`State`] is a plain struct holding all of it. Splitting it up fights the
 //! framework; keep it flat.
 
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
@@ -31,23 +39,28 @@ use smithay::{
         shm::{ShmHandler, ShmState},
     },
 };
-use waypuppet_proto::WindowId;
+use waypuppet_proto::{Point, Rect, WindowId};
 
-use crate::Config;
+use crate::{Config, Frame, Renderer, bridge::Snapshot};
 
 /// What a client gets attached to it when it connects.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ClientState {
     /// Per-client compositor bookkeeping, required by smithay.
     pub compositor_state: CompositorClientState,
+    /// Shared with [`State`], so the control protocol can tell a process that
+    /// has been spawned from one that has actually connected.
+    connections: Arc<AtomicUsize>,
 }
 
 impl ClientData for ClientState {
     fn initialized(&self, _client_id: ClientId) {
+        self.connections.fetch_add(1, Ordering::Relaxed);
         tracing::debug!("client connected");
     }
 
     fn disconnected(&self, _client_id: ClientId, reason: DisconnectReason) {
+        self.connections.fetch_sub(1, Ordering::Relaxed);
         tracing::debug!(?reason, "client disconnected");
     }
 }
@@ -103,6 +116,16 @@ pub struct State {
 
     /// Monotonic time source for frame callbacks.
     clock: Clock<Monotonic>,
+    /// Built on first capture. Deferring it keeps a session that only needs
+    /// the protocol working where EGL is unusable.
+    renderer: Option<Renderer>,
+    /// Which device to render on, from the config.
+    render_node: Option<PathBuf>,
+    /// The output's logical size and scale, as the control protocol reports
+    /// them.
+    reported: (waypuppet_proto::Size, f64),
+    /// How many Wayland clients are currently connected.
+    connections: Arc<AtomicUsize>,
     /// The output's logical size, which is also every window's size.
     output_size: SmithaySize<i32, Logical>,
     /// Source of the next [`WindowId`].
@@ -177,6 +200,10 @@ impl State {
             space,
             records: HashMap::new(),
             clock: Clock::new(),
+            renderer: None,
+            render_node: config.render_node.clone(),
+            reported: (config.output, config.scale),
+            connections: Arc::new(AtomicUsize::new(0)),
             output_size,
             next_window_id: 1,
         }
@@ -193,6 +220,97 @@ impl State {
                     .is_some_and(|toplevel| toplevel.wl_surface() == surface)
             })
             .cloned()
+    }
+
+    /// Per-client data for a newly accepted connection.
+    #[must_use]
+    pub fn new_client_state(&self) -> ClientState {
+        ClientState {
+            compositor_state: CompositorClientState::default(),
+            connections: Arc::clone(&self.connections),
+        }
+    }
+
+    /// Composite the current state and read it back.
+    ///
+    /// Brings the renderer up on first call.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::Error::NoRenderDevice`] if EGL cannot be brought up, or
+    /// [`crate::Error::Render`] if compositing or readback fails.
+    pub fn capture(&mut self) -> Result<Frame, crate::Error> {
+        // Destructured so the renderer can be borrowed mutably while the space
+        // and output are borrowed immutably — they are disjoint fields, but
+        // only a destructuring borrow tells the compiler that.
+        let Self {
+            renderer,
+            render_node,
+            output,
+            space,
+            ..
+        } = self;
+
+        let renderer = match renderer {
+            Some(renderer) => renderer,
+            slot @ None => slot.insert(Renderer::new(output, render_node.as_deref())?),
+        };
+
+        let frame = renderer.capture(output, space)?;
+        self.send_frames();
+        Ok(frame)
+    }
+
+    /// Describe every window, for the control protocol.
+    #[must_use]
+    pub fn snapshot(&self) -> Snapshot {
+        let (output, scale) = self.reported;
+        let mut windows: Vec<_> = self
+            .space
+            .elements()
+            .filter_map(|window| {
+                let toplevel = window.toplevel()?;
+                let surface = toplevel.wl_surface();
+                let record = self.records.get(surface)?;
+                let geometry = self.space.element_geometry(window)?;
+                let (title, app_id) = with_states(surface, |states| {
+                    states
+                        .data_map
+                        .get::<XdgToplevelSurfaceData>()
+                        .and_then(|data| data.lock().ok())
+                        .map_or((None, None), |data| {
+                            (data.title.clone(), data.app_id.clone())
+                        })
+                });
+
+                Some(waypuppet_proto::Window {
+                    id: record.id,
+                    title,
+                    app_id,
+                    geometry: Rect {
+                        origin: Point {
+                            x: geometry.loc.x,
+                            y: geometry.loc.y,
+                        },
+                        size: waypuppet_proto::Size {
+                            width: geometry.size.w.unsigned_abs(),
+                            height: geometry.size.h.unsigned_abs(),
+                        },
+                    },
+                    mapped: record.mapped,
+                    frames: record.frames,
+                })
+            })
+            .collect();
+        // Stable order, so `ps` does not shuffle between calls.
+        windows.sort_by_key(|window| window.id);
+
+        Snapshot {
+            output,
+            scale,
+            windows,
+            connections: self.connections.load(Ordering::Relaxed),
+        }
     }
 
     /// Tell every mapped surface that its last frame was presented.

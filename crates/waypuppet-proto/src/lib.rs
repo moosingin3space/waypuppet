@@ -259,6 +259,29 @@ pub enum Failure {
     /// Rendering or writing the capture failed.
     #[error("capture failed: {0}")]
     Capture(String),
+    /// The compositor loop stopped making progress.
+    ///
+    /// **This is a bug in waypuppet, not in the application under test.** It is
+    /// reported separately from [`Failure::TimedOut`] precisely so a caller can
+    /// tell "my application is not drawing" from "waypuppet is stuck", which
+    /// otherwise look identical from outside.
+    #[error("the compositor loop has not ticked for {millis}ms")]
+    LoopStalled {
+        /// How long the loop has been stuck.
+        millis: u64,
+    },
+    /// The call ran out of time while the compositor was healthy.
+    ///
+    /// Distinct from [`Failure::NotSettled`], which is specifically about the
+    /// client not drawing.
+    #[error("timed out after {millis}ms")]
+    TimedOut {
+        /// The deadline that elapsed.
+        millis: u64,
+    },
+    /// The session is shutting down, so nothing further will be answered.
+    #[error("the session is shutting down")]
+    ShuttingDown,
     /// The feature exists in the design but not yet in the code.
     #[error("not implemented yet: {0}")]
     Unimplemented(String),

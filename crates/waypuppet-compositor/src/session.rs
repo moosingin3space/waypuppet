@@ -1,0 +1,550 @@
+//! A session: a compositor, the process it hosts, and the RPC server that
+//! exposes both.
+//!
+//! Three things run at once. The compositor owns Wayland state on its own
+//! thread and calloop drives it. The application under test is a child process.
+//! The RPC server runs on tokio and answers callers, reaching the compositor
+//! only through [`crate::bridge`].
+//!
+//! # Nothing waits forever
+//!
+//! Every reply the server waits for is bounded, and every bound produces an
+//! error that says which kind of failure it was — see [`crate::bridge`]. That is
+//! the standing rule here: waypuppet cannot promise never to hang, so it
+//! promises to explain.
+
+use std::{
+    path::{Path, PathBuf},
+    process::Stdio,
+    sync::{
+        Arc, Mutex, PoisonError,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, Instant},
+};
+
+use futures::StreamExt as _;
+use tarpc::{
+    context::Context,
+    server::{BaseChannel, Channel as _},
+    tokio_serde::formats::Bincode,
+};
+use tokio::sync::Notify;
+use waypuppet_proto::{
+    Button, Capture, ClientState, Condition, Cursor, Failure, LogChunk, Node, Point, SessionStatus,
+    Settled, Size, Target, Waypuppet,
+};
+
+use crate::{Command, Commands, Compositor, Config, Error};
+
+/// How long the server waits for the compositor to answer a command.
+///
+/// Generous enough for software rendering of a large output, short enough that
+/// a wedged loop is reported while somebody is still watching.
+const COMPOSITOR_DEADLINE: Duration = Duration::from_secs(15);
+
+/// The longest a `logs` long poll is held open before answering emptily.
+const LOG_POLL: Duration = Duration::from_secs(5);
+
+/// Where a named session's control socket lives.
+///
+/// # Errors
+///
+/// Returns [`Error::Compositor`] if `XDG_RUNTIME_DIR` is not set, which means
+/// there is nowhere private to put a socket.
+pub fn socket_path(name: &str) -> Result<PathBuf, Error> {
+    let base = std::env::var_os("XDG_RUNTIME_DIR")
+        .ok_or_else(|| Error::Compositor("XDG_RUNTIME_DIR is not set".to_owned()))?;
+    Ok(PathBuf::from(base)
+        .join("waypuppet")
+        .join(format!("{name}.sock")))
+}
+
+/// Everything the RPC handlers share.
+struct Inner {
+    commands: Commands,
+    capture_dir: PathBuf,
+    /// Counts captures, so unnamed ones get distinct file names.
+    captures: AtomicU64,
+    client: Mutex<Life>,
+    logs: Mutex<Logs>,
+    /// Woken when logs grow or the child exits, so a long poll can return early.
+    activity: Notify,
+    /// Woken when the session should shut down.
+    shutdown: Notify,
+}
+
+/// What is known about the spawned process.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum Life {
+    /// This session hosts no child of its own — `serve` with nothing to run.
+    #[default]
+    None,
+    /// Spawned, and still going.
+    Running,
+    /// Gone. `None` means a signal killed it.
+    Exited(Option<i32>),
+}
+
+/// Output captured from the child.
+#[derive(Debug, Default)]
+struct Logs {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+/// Lock, tolerating poisoning: a panicking task should not take the session
+/// with it when the data is this simple.
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Run a session until it is asked to stop.
+///
+/// Starts the compositor, spawns `argv` against it if given, and serves the
+/// control protocol on `socket`.
+///
+/// # Errors
+///
+/// Returns [`Error::Compositor`] if the compositor, the socket or the child
+/// cannot be started. On success, yields the child's exit code where there was
+/// a child and it exited normally.
+pub async fn serve(
+    config: &Config,
+    socket: &Path,
+    argv: &[String],
+    exit_with_child: bool,
+) -> Result<Option<i32>, Error> {
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let config_for_thread = config.clone();
+
+    // The compositor is not `Send`, so it is built on the thread that runs it
+    // and only its socket name and command channel come back.
+    let compositor_thread = std::thread::Builder::new()
+        .name("waypuppet-compositor".to_owned())
+        .spawn(move || {
+            let mut compositor = match Compositor::new(&config_for_thread) {
+                Ok(compositor) => compositor,
+                Err(error) => {
+                    let _ = ready_tx.send(Err(error));
+                    return;
+                }
+            };
+            let ready = (compositor.socket_name().to_owned(), compositor.commands());
+            if ready_tx.send(Ok(ready)).is_err() {
+                return;
+            }
+            if let Err(error) = compositor.run() {
+                tracing::error!(%error, "the compositor loop stopped");
+            }
+            // Falling out of here drops every `oneshot::Sender` the compositor
+            // was holding, which is what makes outstanding calls fail promptly
+            // instead of sitting on their deadlines.
+        })
+        .map_err(|error| Error::Compositor(error.to_string()))?;
+
+    let (wayland_display, commands) =
+        ready_rx
+            .recv_timeout(Duration::from_secs(30))
+            .map_err(|_| {
+                Error::Compositor("the compositor thread never reported ready".to_owned())
+            })??;
+
+    let inner = Arc::new(Inner {
+        commands,
+        capture_dir: config.capture_dir.clone(),
+        captures: AtomicU64::new(0),
+        client: Mutex::new(Life::default()),
+        logs: Mutex::new(Logs::default()),
+        activity: Notify::new(),
+        shutdown: Notify::new(),
+    });
+
+    if !argv.is_empty() {
+        spawn_child(&inner, argv, &wayland_display, exit_with_child)?;
+    }
+
+    let result = accept(&inner, socket).await;
+
+    // Stop the compositor and let the socket go, whatever happened.
+    let _ = inner.commands.send(Command::Stop);
+    let _ = std::fs::remove_file(socket);
+    let _ = compositor_thread.join();
+
+    let exit = match *lock(&inner.client) {
+        Life::Exited(code) => code,
+        Life::None | Life::Running => None,
+    };
+    result.map(|()| exit)
+}
+
+/// Serve the control socket until told to shut down.
+async fn accept(inner: &Arc<Inner>, socket: &Path) -> Result<(), Error> {
+    if let Some(parent) = socket.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| Error::Compositor(error.to_string()))?;
+    }
+    reclaim(socket).await;
+
+    let mut listener = tarpc::serde_transport::unix::listen(socket, Bincode::default)
+        .await
+        .map_err(|error| Error::Compositor(format!("{}: {error}", socket.display())))?;
+    listener.config_mut().max_frame_length(usize::MAX);
+
+    tracing::info!(socket = %socket.display(), "control socket listening");
+
+    let serving = async {
+        while let Some(Ok(transport)) = listener.next().await {
+            let server = Server(Arc::clone(inner));
+            tokio::spawn(
+                BaseChannel::with_defaults(transport)
+                    .execute(server.serve())
+                    .for_each(|response| async move {
+                        tokio::spawn(response);
+                    }),
+            );
+        }
+    };
+
+    tokio::select! {
+        () = serving => {}
+        () = inner.shutdown.notified() => {}
+    }
+    Ok(())
+}
+
+/// Remove a socket file whose listener is gone.
+///
+/// A leftover socket from a crashed session is indistinguishable from a live
+/// one by looking at the filesystem, so ask it: a connection refused means
+/// nobody is listening and the path is ours to take.
+async fn reclaim(socket: &Path) {
+    if !socket.exists() {
+        return;
+    }
+    if tokio::net::UnixStream::connect(socket).await.is_ok() {
+        tracing::warn!(socket = %socket.display(), "a session is already listening here");
+    } else {
+        tracing::debug!(socket = %socket.display(), "reclaiming a stale socket");
+        let _ = std::fs::remove_file(socket);
+    }
+}
+
+/// Start the application under test.
+fn spawn_child(
+    inner: &Arc<Inner>,
+    argv: &[String],
+    wayland_display: &str,
+    exit_with_child: bool,
+) -> Result<(), Error> {
+    let mut command = tokio::process::Command::new(&argv[0]);
+    command
+        .args(&argv[1..])
+        .env("WAYLAND_DISPLAY", wayland_display)
+        // Never inherit these: a client that picked up the caller's real
+        // desktop would open a window there and look like it had worked, which
+        // is the worst available failure.
+        .env_remove("DISPLAY")
+        .stdin(Stdio::null())
+        // Captured rather than inherited. Losing the client's last words is
+        // precisely the failure waypuppet exists to fix.
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = command
+        .spawn()
+        .map_err(|error| Error::Compositor(format!("{}: {error}", argv[0])))?;
+
+    *lock(&inner.client) = Life::Running;
+
+    if let Some(stdout) = child.stdout.take() {
+        tokio::spawn(drain(Arc::clone(inner), stdout, Stream::Stdout));
+    }
+    if let Some(stderr) = child.stderr.take() {
+        tokio::spawn(drain(Arc::clone(inner), stderr, Stream::Stderr));
+    }
+
+    tokio::spawn({
+        let inner = Arc::clone(inner);
+        async move {
+            let started = Instant::now();
+            let status = child.wait().await;
+            let code = status.ok().and_then(|status| status.code());
+            *lock(&inner.client) = Life::Exited(code);
+            // Wake every long poll: a follower needs to stop, not keep waiting
+            // for output that will never come.
+            inner.activity.notify_waiters();
+
+            if exit_with_child {
+                report_exit(&inner, code, started.elapsed()).await;
+                let _ = inner.commands.send(Command::Stop);
+                inner.shutdown.notify_waiters();
+            }
+        }
+    });
+
+    Ok(())
+}
+
+/// Explain what happened to a client that has exited.
+///
+/// This is the diagnostic waypuppet exists for. A process that dies during
+/// startup otherwise leaves nothing behind but an exit code, which is exactly
+/// the situation that made this project necessary — so say what was seen, and
+/// hand back what the process managed to write.
+async fn report_exit(inner: &Arc<Inner>, code: Option<i32>, lifetime: Duration) {
+    let mapped = inner
+        .commands
+        .ask(COMPOSITOR_DEADLINE, Command::Status)
+        .await
+        .map(|snapshot| snapshot.windows.iter().filter(|w| w.mapped).count())
+        .unwrap_or_default();
+
+    let outcome = match code {
+        Some(code) => format!("exited {code}"),
+        None => "was killed by a signal".to_owned(),
+    };
+    let windows = match mapped {
+        0 => "without mapping a window".to_owned(),
+        1 => "having mapped 1 window".to_owned(),
+        n => format!("having mapped {n} windows"),
+    };
+    eprintln!(
+        "session: client {outcome} after {}ms {windows}",
+        lifetime.as_millis()
+    );
+
+    // Only worth printing when something went wrong; a clean run that drew
+    // something does not need its output repeated back.
+    if code != Some(0) || mapped == 0 {
+        let logs = lock(&inner.logs);
+        for (name, bytes) in [("stdout", &logs.stdout), ("stderr", &logs.stderr)] {
+            if !bytes.is_empty() {
+                eprintln!("--- {name} ---");
+                eprint!("{}", String::from_utf8_lossy(bytes));
+            }
+        }
+    }
+}
+
+/// Which of the child's streams a reader is draining.
+#[derive(Clone, Copy)]
+enum Stream {
+    Stdout,
+    Stderr,
+}
+
+/// Accumulate one of the child's streams into the log buffer.
+async fn drain<R>(inner: Arc<Inner>, mut reader: R, stream: Stream)
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt as _;
+
+    let mut buffer = [0_u8; 8192];
+    while let Ok(read) = reader.read(&mut buffer).await {
+        if read == 0 {
+            break;
+        }
+        {
+            let mut logs = lock(&inner.logs);
+            match stream {
+                Stream::Stdout => logs.stdout.extend_from_slice(&buffer[..read]),
+                Stream::Stderr => logs.stderr.extend_from_slice(&buffer[..read]),
+            }
+        }
+        inner.activity.notify_waiters();
+    }
+}
+
+/// The RPC server. One per connection, all sharing [`Inner`].
+#[derive(Clone)]
+struct Server(Arc<Inner>);
+
+impl Server {
+    /// How the child is doing, in protocol terms.
+    fn client_state(&self, connections: usize) -> ClientState {
+        match *lock(&self.0.client) {
+            Life::Exited(code) => ClientState::Exited { code },
+            // A session hosting nothing has nothing to be starting.
+            Life::None => ClientState::Running,
+            // Spawned is not the same as connected: a process that started but
+            // never reached the compositor is a different problem from one that
+            // connected and then crashed, and `Starting` is how that shows.
+            Life::Running if connections > 0 => ClientState::Running,
+            Life::Running => ClientState::Starting,
+        }
+    }
+
+    /// Where an unnamed capture should be written.
+    fn capture_path(&self) -> PathBuf {
+        let n = self.0.captures.fetch_add(1, Ordering::Relaxed);
+        self.0.capture_dir.join(format!("waypuppet-{n:04}.png"))
+    }
+}
+
+impl Waypuppet for Server {
+    async fn status(self, _: Context) -> Result<SessionStatus, Failure> {
+        let snapshot = self
+            .0
+            .commands
+            .ask(COMPOSITOR_DEADLINE, Command::Status)
+            .await?;
+        Ok(SessionStatus {
+            output: snapshot.output,
+            scale: snapshot.scale,
+            client: self.client_state(snapshot.connections),
+            windows: snapshot.windows,
+        })
+    }
+
+    async fn shot(
+        self,
+        _: Context,
+        _target: Target,
+        output: Option<PathBuf>,
+    ) -> Result<Capture, Failure> {
+        let frame = self
+            .0
+            .commands
+            .ask(COMPOSITOR_DEADLINE, Command::Capture)
+            .await?
+            .map_err(Failure::Capture)?;
+
+        let path = output.unwrap_or_else(|| self.capture_path());
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| Failure::Capture(error.to_string()))?;
+        }
+        frame
+            .write_png(&path)
+            .map_err(|error| Failure::Capture(error.to_string()))?;
+
+        let snapshot = self
+            .0
+            .commands
+            .ask(COMPOSITOR_DEADLINE, Command::Status)
+            .await?;
+        Ok(Capture {
+            path,
+            size: Size {
+                width: frame.width,
+                height: frame.height,
+            },
+            scale: snapshot.scale,
+        })
+    }
+
+    // `done` means "no more output is coming", which is true both when the
+    // child has exited and when there is no child at all. Treating only the
+    // former as done would make `logs` against a childless session block for
+    // the whole poll window before answering emptily.
+    async fn logs(self, context: Context, after: Cursor) -> Result<LogChunk, Failure> {
+        let limit = remaining(&context).min(LOG_POLL);
+        let deadline = tokio::time::Instant::now() + limit;
+
+        loop {
+            // Register interest *before* reading, or output arriving between
+            // the read and the wait would be missed until the next poll.
+            let waiting = self.0.activity.notified();
+
+            let (chunk, has_new) = {
+                let logs = lock(&self.0.logs);
+                let done = !matches!(*lock(&self.0.client), Life::Running);
+                let chunk = slice_from(&logs, after, done);
+                let has_new = !chunk.stdout.is_empty() || !chunk.stderr.is_empty();
+                (chunk, has_new)
+            };
+
+            if has_new || chunk.done || tokio::time::Instant::now() >= deadline {
+                return Ok(chunk);
+            }
+
+            if tokio::time::timeout_at(deadline, waiting).await.is_err() {
+                // Nothing new before the deadline. An empty chunk is the right
+                // answer: the caller resumes from the same cursor.
+                let logs = lock(&self.0.logs);
+                let done = !matches!(*lock(&self.0.client), Life::Running);
+                return Ok(slice_from(&logs, after, done));
+            }
+        }
+    }
+
+    async fn kill(self, _: Context) -> Result<(), Failure> {
+        self.0.commands.send(Command::Stop)?;
+        self.0.shutdown.notify_waiters();
+        Ok(())
+    }
+
+    async fn key(self, _: Context, _chords: Vec<String>) -> Result<(), Failure> {
+        Err(unimplemented("key"))
+    }
+
+    async fn write(self, _: Context, _text: String) -> Result<(), Failure> {
+        Err(unimplemented("write"))
+    }
+
+    async fn pointer(self, _: Context, _to: Point, _target: Target) -> Result<(), Failure> {
+        Err(unimplemented("pointer"))
+    }
+
+    async fn click(
+        self,
+        _: Context,
+        _at: Option<Point>,
+        _button: Button,
+        _target: Target,
+    ) -> Result<(), Failure> {
+        Err(unimplemented("click"))
+    }
+
+    async fn scroll(self, _: Context, _dx: i32, _dy: i32) -> Result<(), Failure> {
+        Err(unimplemented("scroll"))
+    }
+
+    async fn resize(self, _: Context, _size: Size, _target: Target) -> Result<(), Failure> {
+        Err(unimplemented("resize"))
+    }
+
+    async fn wait(
+        self,
+        _: Context,
+        _condition: Condition,
+        _timeout: Duration,
+    ) -> Result<Settled, Failure> {
+        Err(unimplemented("wait"))
+    }
+
+    async fn tree(self, _: Context, _target: Target) -> Result<Node, Failure> {
+        Err(unimplemented("tree"))
+    }
+}
+
+/// The verbs later phases will fill in.
+fn unimplemented(verb: &str) -> Failure {
+    Failure::Unimplemented(format!("{verb} lands with a later phase; see plans/"))
+}
+
+/// How long a call has left before its deadline.
+///
+/// tarpc propagates the caller's deadline, so a long poll can honour it rather
+/// than inventing its own idea of patience.
+fn remaining(context: &Context) -> Duration {
+    context.deadline.saturating_duration_since(Instant::now())
+}
+
+/// Everything after `cursor`, and where to resume from.
+fn slice_from(logs: &Logs, cursor: Cursor, done: bool) -> LogChunk {
+    let take = |bytes: &[u8], from: u64| -> String {
+        let from = usize::try_from(from).unwrap_or(usize::MAX).min(bytes.len());
+        String::from_utf8_lossy(&bytes[from..]).into_owned()
+    };
+
+    LogChunk {
+        stdout: take(&logs.stdout, cursor.stdout),
+        stderr: take(&logs.stderr, cursor.stderr),
+        cursor: Cursor {
+            stdout: logs.stdout.len() as u64,
+            stderr: logs.stderr.len() as u64,
+        },
+        done,
+    }
+}
