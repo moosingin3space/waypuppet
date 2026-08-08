@@ -316,5 +316,8 @@ fn handle_command(state: &mut State, command: Command) {
             let _ = reply.send(state.capture().map_err(|error| error.to_string()));
         }
         Command::Stop => state.running = false,
+        // Fault injection: block the loop for real, so the heartbeat's claim
+        // to detect a stall can be tested rather than believed.
+        Command::Stall(duration) => std::thread::sleep(duration),
     }
 }

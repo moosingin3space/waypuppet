@@ -1,6 +1,6 @@
 # 03 — Control socket
 
-**Status:** mostly done — `wait`, `--follow` cancellation and the stall test remain
+**Status:** mostly done — `wait` and `--follow` cancellation remain
 **Depends on:** [02](02-rendering-and-capture.md)
 
 ## Goal
@@ -142,9 +142,24 @@ deadlock.
   bridge is built for them but nothing parks yet.
 - **`logs --follow` cancellation.** A follower that is killed leaves its long poll to
   expire rather than being cancelled by the dropped connection.
-- **A test for the stall diagnosis.** `Heartbeat::diagnose` is written and unexercised;
-  there is no way to stall the loop on purpose yet. Do not trust it until there is.
 - Input verbs return `Failure::Unimplemented`, pointing at `plans/`.
+
+## Defence 3 is tested now
+
+`Command::Stall` is fault injection: it blocks the compositor thread on purpose, because
+the only way to know whether a stall detector detects stalls is to cause one. Nothing
+reachable from the CLI or the control protocol sends it.
+
+`tests/stall.rs` wedges a real compositor and asserts a call made during the wedge comes
+back as `LoopStalled`, then that the session recovers once the stall clears. Four unit
+tests in `bridge.rs` cover the branches: stalled, healthy-but-timed-out, dropped reply, and
+dead channel.
+
+**Verified by mutation, not by passing.** Inverting the comparison in `diagnose` makes
+three of them fail with the messages they were written to produce. That check is worth
+repeating on anything in this family — the whole failure mode here is silent, because a
+`diagnose` that always answered `TimedOut` would still fail every call correctly and only
+name the wrong culprit.
 
 ## What we learned
 
@@ -156,6 +171,15 @@ deadlock.
   before answering emptily — the control test took 5.07s. It now takes 0.07s. A long poll's
   terminating condition is easy to get subtly wrong in the direction of "works, but slowly",
   which no assertion catches.
+- **A test that cannot fail is worse than no test.** The first integration test for the
+  healthy-loop branch passed against a deliberately broken `diagnose`: every command a real
+  compositor can answer, it answers in microseconds, so there is no way to make one time out
+  without also blocking the loop — which is the other case. It was deleted rather than kept
+  as decoration, and the branch is covered in `bridge.rs` where the heartbeat can be beaten
+  with no compositor attached.
+- **`deny(warnings)` blocks the laziest mutations.** Stubbing the condition to `if false`
+  would not compile, because the parameter goes unused. Inverting the comparison is both
+  compilable and a more realistic bug, which made it the better probe anyway.
 - **The compositor thread ending is the cancellation.** Falling out of `run()` drops every
   `oneshot::Sender` it held, so outstanding calls fail immediately rather than on their
   deadlines. Defence 2 needed no code at all beyond structuring it that way.

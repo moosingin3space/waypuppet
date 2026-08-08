@@ -42,3 +42,7 @@ path = "tests/capture.rs"
 [[test]]
 name = "control"
 path = "tests/control.rs"
+
+[[test]]
+name = "stall"
+path = "tests/stall.rs"

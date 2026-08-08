@@ -64,6 +64,16 @@ pub enum Command {
     Capture(oneshot::Sender<Result<Frame, String>>),
     /// Stop the loop. Nothing to answer: the sender dropping is the answer.
     Stop,
+    /// Block the compositor thread for this long, on purpose.
+    ///
+    /// Fault injection. [`Heartbeat`] claims to tell a wedged loop from a
+    /// client that is merely quiet, and the only way to know whether it does is
+    /// to wedge the loop and look — so this exists to make that testable rather
+    /// than assumed.
+    ///
+    /// Nothing reachable from the CLI or the control protocol sends it; it is a
+    /// library-level affordance for waypuppet's own tests.
+    Stall(Duration),
 }
 
 /// Proof that the compositor loop is still running.
@@ -219,5 +229,123 @@ impl Commands {
             Ok(Err(_)) => Err(Failure::ShuttingDown),
             Err(_) => Err(self.heartbeat.diagnose(ticks, started.elapsed())),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::future::pending;
+
+    use calloop::ping::make_ping;
+
+    use super::{Command, Commands, Failure, Heartbeat};
+    use std::{sync::Arc, time::Duration};
+
+    /// Short enough to keep the suite quick, long enough not to be flaky on a
+    /// loaded machine.
+    const DEADLINE: Duration = Duration::from_millis(200);
+
+    /// Build a bridge whose compositor end is whatever the caller does with the
+    /// receiver.
+    fn bridge() -> (
+        Commands,
+        tokio::sync::mpsc::UnboundedReceiver<Command>,
+        calloop::ping::PingSource,
+    ) {
+        let (ping, source) = make_ping().expect("ping");
+        let (commands, receiver) = Commands::new(ping, Arc::new(Heartbeat::new()));
+        (commands, receiver, source)
+    }
+
+    #[tokio::test]
+    async fn a_loop_that_never_ticks_is_reported_as_stalled() {
+        // The receiver is held but never drained, which is what a wedged
+        // compositor looks like from here: the command is queued and nothing
+        // ever answers it.
+        let (commands, _receiver, _source) = bridge();
+
+        let failure = commands
+            .ask(DEADLINE, Command::Status)
+            .await
+            .expect_err("nothing answered, so this cannot succeed");
+
+        assert!(
+            matches!(failure, Failure::LoopStalled { .. }),
+            "a loop that never ticked should be blamed, not the caller: {failure:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_healthy_loop_is_reported_as_a_plain_timeout() {
+        let (commands, _receiver, _source) = bridge();
+        let heartbeat = Arc::clone(commands.heartbeat());
+
+        // The loop is alive and ticking; it just has not got to this command.
+        // That is the application's problem, not waypuppet's, and the failure
+        // has to say so.
+        tokio::spawn(async move {
+            loop {
+                heartbeat.beat();
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        });
+
+        let failure = commands
+            .ask(DEADLINE, Command::Status)
+            .await
+            .expect_err("nothing answered, so this cannot succeed");
+
+        assert!(
+            matches!(failure, Failure::TimedOut { .. }),
+            "a ticking loop must not be blamed: {failure:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dropped_reply_fails_at_once_rather_than_on_the_deadline() {
+        let (commands, mut receiver, _source) = bridge();
+
+        // Take the command and drop it without answering — exactly what a
+        // compositor thread that panics does to everything it was holding.
+        tokio::spawn(async move {
+            drop(receiver.recv().await);
+            // Keep the receiver's channel open, so this tests the dropped
+            // *reply* rather than the dropped channel.
+            pending::<()>().await;
+        });
+
+        let started = std::time::Instant::now();
+        let failure = commands
+            .ask(Duration::from_secs(30), Command::Status)
+            .await
+            .expect_err("the reply was dropped");
+
+        assert!(
+            matches!(failure, Failure::ShuttingDown),
+            "expected shutdown, got {failure:?}",
+        );
+        // The point of defence 2: this is `Drop` waking the receiver, not the
+        // deadline expiring. A thirty-second deadline would have hidden it.
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "should have failed immediately, took {:?}",
+            started.elapsed(),
+        );
+    }
+
+    #[tokio::test]
+    async fn a_gone_compositor_fails_without_queueing() {
+        let (commands, receiver, _source) = bridge();
+        drop(receiver);
+
+        let failure = commands
+            .ask(Duration::from_secs(30), Command::Status)
+            .await
+            .expect_err("there is nothing to answer");
+
+        assert!(
+            matches!(failure, Failure::ShuttingDown),
+            "expected shutdown, got {failure:?}",
+        );
     }
 }
