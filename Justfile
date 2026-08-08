@@ -1,9 +1,10 @@
 # waypuppet development commands. `just` on its own lists them.
 #
 # Everything builds and runs inside the Flatpak SDK. The SDK supplies the system
-# libraries this host lacks — libwayland-server, EGL, GBM, libdrm and xkbcommon, plus
-# a C toolchain for gbm's bindings — while mise supplies the pinned Rust toolchain
-# *inside* it. That split keeps mise.toml the single source of truth for the compiler.
+# libraries — libwayland-server, EGL, GBM, libdrm and xkbcommon, plus a C toolchain for
+# gbm's bindings — so the build does not depend on what any given machine happens to have
+# installed, while mise supplies the pinned Rust toolchain *inside* it. That split keeps
+# mise.toml the single source of truth for the compiler.
 #
 # Run `just setup` once after checkout.
 

@@ -80,15 +80,20 @@ changes — into something that says what it means.
 ## Where it runs
 
 In a container: Flatpak or Podman, no VM required. The only thing waypuppet needs from the
-host is a DRM render node, and it falls back to software rendering when there is none.
-`waypuppet doctor` reports which it found, and says what flag is missing when it finds
-nothing.
+machine underneath is a DRM render node, and it falls back to software rendering when there
+is none.
+
+You are not expected to know any of that. waypuppet works out which runtime it needs, puts
+itself and your application in the same one, and figures out the mounts from the command
+you gave it. `waypuppet run -- ./target/debug/my-app` is the whole interface; if you ever
+find yourself writing `flatpak run` to use waypuppet, that is a bug. `waypuppet doctor`
+prints what it resolved, for when you do want to look.
 
 ## Interface
 
-A CLI, not a daemon protocol you have to speak. The control socket underneath is
-newline-delimited JSON, so anything else — an MCP server, a test harness, a shell loop —
-can drive a session too, but the command line is the product.
+A CLI, not a daemon protocol you have to speak. Underneath it is a [tarpc] service over a
+Unix socket, so anything else — an MCP server, a test harness, another Rust program — can
+drive a session too, but the command line is the product.
 
 | | |
 |---|---|
@@ -109,9 +114,9 @@ Mutating verbs settle before they return: `click` waits for the frame the click 
 
 ## Status
 
-Early. The workspace, the control protocol types and the command surface are in place, and
-`waypuppet doctor` works. The compositor itself is being written — see [CLAUDE.md] for the
-architecture and the order things are landing in.
+Early. The workspace, the service definition and the command surface are in place, and
+`waypuppet doctor` works. The compositor itself is being written: [CLAUDE.md] has the
+architecture, and [plans/](plans/) has one file per phase in the order they are landing.
 
 Built to test [example-app], which is why the first things to work will be the ones a terminal
 application needs: text input, key repeat, clipboard and resize.
@@ -121,6 +126,7 @@ application needs: text input, key repeat, clipboard and resize.
 It puppets a Wayland client. It also holds the strings.
 
 [Smithay]: https://smithay.github.io/
+[tarpc]: https://lib.rs/crates/tarpc
 [AccessKit]: https://accesskit.dev/
 [freya]: https://freyaui.dev/
 [example-app]: ../example-app

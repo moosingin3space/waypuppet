@@ -19,9 +19,21 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# The compositor stack. `calloop` is smithay's event loop and, deliberately, the only
-# one in the process — see CLAUDE.md, "No async runtime".
+# calloop drives the compositor thread; tokio drives the control thread. They meet over
+# a channel, and neither one blocks the other — see CLAUDE.md, "Two loops, one bridge".
 calloop = "0.14"
+futures = "0.3"
+tokio = { version = "1.53", features = ["rt", "net", "sync", "process", "macros"] }
+
+# The control plane. Deadlines and cancellation come with it, the service is a Rust
+# trait rather than a schema in another language, and there is no codegen step.
+tarpc = { version = "0.37", features = [
+    "serde1",
+    "tokio1",
+    "serde-transport",
+    "serde-transport-bincode",
+    "unix",
+] }
 
 # smithay's default features assume a compositor that owns real hardware: libinput for
 # devices, libseat for the session, udev for discovery, winit and x11 for nested

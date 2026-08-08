@@ -10,6 +10,5 @@ workspace = true
 
 [dependencies]
 serde.workspace = true
-# `Response::Tree` carries the accessibility tree as it came off the bus, so the
-# shape is the app's, not ours.
-serde_json.workspace = true
+tarpc.workspace = true
+thiserror.workspace = true
