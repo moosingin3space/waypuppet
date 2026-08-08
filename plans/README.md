@@ -13,7 +13,7 @@ instead.
 | | Plan | Status |
 |---|---|---|
 | 01 | [Compositor core](01-compositor-core.md) — a client can connect and map a window | **done** |
-| 02 | [Rendering and capture](02-rendering-and-capture.md) — a frame becomes a PNG | not started |
+| 02 | [Rendering and capture](02-rendering-and-capture.md) — a frame becomes a PNG | in progress |
 | 03 | [Control socket](03-control-socket.md) — `run`, `ps`, `shot`, `logs`, `kill` | not started |
 | 04 | [Input](04-input.md) — `key`, `type`, `click`, `move`, `scroll` | not started |
 | 05 | [Wait](05-wait.md) — block on protocol facts, not on sleeps | not started |
