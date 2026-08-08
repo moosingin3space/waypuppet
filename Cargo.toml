@@ -1,0 +1,64 @@
+[workspace]
+resolver = "3"
+members = ["crates/waypuppet", "crates/waypuppet-host", "crates/waypuppet-proto"]
+
+[workspace.package]
+authors = ["Nathan Moos <moosingin3space@gmail.com>"]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+waypuppet-host = { path = "crates/waypuppet-host" }
+waypuppet-proto = { path = "crates/waypuppet-proto" }
+
+clap = { version = "4.6", features = ["derive", "env"] }
+png = "0.18"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# The compositor stack. `calloop` is smithay's event loop and, deliberately, the only
+# one in the process — see CLAUDE.md, "No async runtime".
+calloop = "0.14"
+
+# smithay's default features assume a compositor that owns real hardware: libinput for
+# devices, libseat for the session, udev for discovery, winit and x11 for nested
+# development. waypuppet has none of those — it is headless by construction and its
+# input is synthetic — and neither libinput nor libseat ships in the Flatpak SDK, so the
+# defaults do not even build here.
+#
+# The selection lives on the workspace dependency rather than in waypuppet-host, because
+# cargo forbids a member from turning off default features the workspace left on.
+[workspace.dependencies.smithay]
+version = "0.7"
+default-features = false
+features = [
+    # The wayland-server half: globals, xdg-shell, seat, output, dmabuf.
+    "wayland_frontend",
+    # `Space` and `Window`, so window management is not written from scratch.
+    "desktop",
+    # Headless EGL on a render node, and the GLES renderer that can render into an
+    # offscreen buffer and copy it back to CPU memory. This is the capture path.
+    "backend_egl",
+    "renderer_gl",
+    # gbm allocates the offscreen render target and backs `zwp_linux_dmabuf_v1`, so
+    # clients that render with EGL — anything Skia-backed, which is the point — have
+    # somewhere to put their buffers. Pulls `backend_drm` with it.
+    "backend_gbm",
+    # Lets EGL bind the wayland display (`wl_drm`), which older client stacks look for
+    # before they will use hardware buffers.
+    "use_system_lib",
+]
+
+[workspace.lints.rust]
+warnings = "deny"
+missing_docs = "deny"
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = { priority = -2, level = "deny" }
+pedantic = { priority = -1, level = "deny" }
+mod_module_files = "deny"
+allow_attributes = "deny"

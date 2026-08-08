@@ -1,0 +1,18 @@
+[package]
+name = "waypuppet-host"
+description = "The headless Wayland compositor that hosts and drives an application under test."
+authors.workspace = true
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+waypuppet-proto.workspace = true
+
+calloop.workspace = true
+# Feature selection, and the reasoning behind it, lives on the workspace dependency.
+smithay.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

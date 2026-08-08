@@ -1,0 +1,20 @@
+# The toolchain. System libraries come from the Flatpak SDK instead — see the Justfile
+# and CLAUDE.md for why the two layers are split that way.
+
+[tools]
+# `just` is the entry point for every workflow here, so it is pinned rather than
+# assumed to be on PATH.
+just = "1.58.0"
+
+# Tracking `stable` rather than a fixed version: this is a young project with no
+# release to support, so following the toolchain costs less than pinning and manually
+# bumping.
+#
+# `components` names clippy and rustfmt explicitly, because mise otherwise defers to
+# rustup's configured profile, which is `minimal` on most CI runners and would leave
+# `just lint` without either.
+#
+# This toolchain runs *inside* the Flatpak SDK: the Justfile mounts mise's installs
+# into the sandbox and calls `mise exec` there. The SDK's own rust extension goes
+# unused, so this file stays the single source of truth for the compiler.
+rust = { version = "stable", components = ["clippy", "rustfmt", "rust-analyzer"] }

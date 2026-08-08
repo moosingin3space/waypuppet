@@ -1,0 +1,15 @@
+[package]
+name = "waypuppet-proto"
+description = "Wire types for the waypuppet control protocol."
+authors.workspace = true
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+# `Response::Tree` carries the accessibility tree as it came off the bus, so the
+# shape is the app's, not ours.
+serde_json.workspace = true

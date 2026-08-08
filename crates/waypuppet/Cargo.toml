@@ -1,0 +1,18 @@
+[package]
+name = "waypuppet"
+description = "Run a GUI application inside a headless compositor, then look at it and drive it."
+authors.workspace = true
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+waypuppet-host.workspace = true
+waypuppet-proto.workspace = true
+
+clap.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
