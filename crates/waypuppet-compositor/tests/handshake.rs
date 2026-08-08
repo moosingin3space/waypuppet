@@ -8,9 +8,6 @@
 
 mod fixture;
 
-use std::{path::PathBuf, sync::mpsc, time::Duration};
-
-use waypuppet_compositor::{Compositor, Config};
 use waypuppet_proto::Size;
 
 const OUTPUT: Size = Size {
@@ -20,50 +17,30 @@ const OUTPUT: Size = Size {
 
 #[test]
 fn a_client_connects_configures_and_commits() {
-    let (socket_tx, socket_rx) = mpsc::channel();
+    fixture::guarded("handshake", OUTPUT, |harness| {
+        let mut client = harness.start_client("handshake");
+        let (width, height) = harness.configure(&mut client);
 
-    // The compositor is not `Send`, so it is built on the thread that runs it
-    // and only its socket name comes back.
-    let compositor = std::thread::spawn(move || {
-        let mut compositor = Compositor::new(&Config {
-            output: OUTPUT,
-            ..Config::default()
-        })
-        .expect("compositor starts");
-        socket_tx
-            .send(compositor.socket_name().to_owned())
-            .expect("the test is still listening");
-        compositor.run().expect("compositor runs");
+        assert!(
+            client.surface_was_configured(),
+            "xdg_toplevel.configure arrived without xdg_surface.configure",
+        );
+        assert_eq!(
+            (width, height),
+            (
+                i32::try_from(OUTPUT.width).unwrap(),
+                i32::try_from(OUTPUT.height).unwrap()
+            ),
+            "the window should be configured to fill the output",
+        );
+
+        // Mapping is the part that can still fail: attaching a buffer and
+        // committing exercises `wl_shm`, the buffer handler and the commit path.
+        harness.paint(&mut client, [0xFF, 0xFF, 0xFF, 0xFF]);
+        harness.drive_until("the window to map", |state| {
+            state.records.values().any(|record| record.mapped)
+        });
+
+        harness.stop(client);
     });
-
-    let socket_name = socket_rx
-        .recv_timeout(Duration::from_secs(10))
-        .expect("the compositor reports its socket");
-    let socket = PathBuf::from(
-        std::env::var_os("XDG_RUNTIME_DIR").expect("XDG_RUNTIME_DIR is set in the sandbox"),
-    )
-    .join(&socket_name);
-
-    let mut client = fixture::Client::connect(&socket, "handshake");
-    let (width, height) = client.wait_for_configure();
-
-    assert!(
-        client.events.surface_configured,
-        "xdg_toplevel.configure arrived without xdg_surface.configure",
-    );
-    assert_eq!(
-        (width, height),
-        (
-            i32::try_from(OUTPUT.width).unwrap(),
-            i32::try_from(OUTPUT.height).unwrap()
-        ),
-        "the window should be configured to fill the output",
-    );
-
-    // Mapping is the part that can still fail: attaching a buffer and
-    // committing exercises `wl_shm`, the buffer handler and the commit path.
-    client.paint((width, height), [0xFF, 0xFF, 0xFF, 0xFF]);
-
-    drop(client);
-    drop(compositor);
 }
