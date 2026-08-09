@@ -14,10 +14,11 @@ use std::path::Path;
 
 use smithay::{
     backend::{
-        allocator::Fourcc,
+        allocator::{Fourcc, dmabuf::Dmabuf, format::FormatSet},
+        drm::DrmNode,
         egl::{EGLContext, EGLDevice, EGLDisplay},
         renderer::{
-            Bind, Color32F, ExportMem, Offscreen,
+            Bind, Color32F, ExportMem, ImportDma, ImportEgl, Offscreen,
             damage::OutputDamageTracker,
             element::surface::WaylandSurfaceRenderElement,
             gles::{GlesRenderbuffer, GlesRenderer},
@@ -25,6 +26,7 @@ use smithay::{
     },
     desktop::{Space, Window, space::render_output},
     output::Output,
+    reexports::wayland_server::DisplayHandle,
     utils::{Buffer as BufferCoords, Rectangle, Size},
 };
 
@@ -88,6 +90,9 @@ impl Frame {
 pub struct Renderer {
     gles: GlesRenderer,
     damage: OutputDamageTracker,
+    /// The render node this renderer is on, when it has one. Software devices
+    /// do not, which is why it is optional rather than assumed.
+    node: Option<DrmNode>,
     /// Kept alive because the context borrows it. Dropping it early tears the
     /// context out from under the renderer.
     _display: EGLDisplay,
@@ -136,6 +141,11 @@ impl Renderer {
 
     /// Build a renderer on one specific device.
     fn on_device(device: EGLDevice, output: &Output) -> Result<Self, Error> {
+        // Read before the device is consumed below. A software device has no
+        // node, which is not an error — it only means there is nothing to name
+        // in dmabuf feedback.
+        let node = device.try_get_render_node().ok().flatten();
+
         // Both EGL entry points are `unsafe` in smithay. The obligation in each
         // case is that the handle is not used after the display is destroyed,
         // which is structural here: `_display` is owned by this struct and
@@ -158,8 +168,58 @@ impl Renderer {
         Ok(Self {
             gles,
             damage: OutputDamageTracker::from_output(output),
+            node,
             _display: display,
         })
+    }
+
+    /// The dmabuf formats this renderer can import.
+    ///
+    /// What goes in the `zwp_linux_dmabuf_v1` global: a client picks from this
+    /// list, so anything advertised here has to be something
+    /// [`Renderer::import_dmabuf`] will actually accept.
+    #[must_use]
+    pub fn dmabuf_formats(&self) -> FormatSet {
+        self.gles.dmabuf_formats()
+    }
+
+    /// The render node this renderer is on, if it has one.
+    #[must_use]
+    pub fn node(&self) -> Option<DrmNode> {
+        self.node
+    }
+
+    /// Let EGL answer for `wl_drm` buffers on this display.
+    ///
+    /// The modern path is `zwp_linux_dmabuf_v1`; this is the older one, which
+    /// some client stacks still look for before they will use hardware buffers
+    /// at all. It is why `use_system_lib` is in the smithay feature list.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Render`] if the EGL implementation cannot bind a
+    /// Wayland display, which is not fatal — dmabuf still works without it.
+    pub fn bind_wl_display(&mut self, display: &DisplayHandle) -> Result<(), Error> {
+        self.gles
+            .bind_wl_display(display)
+            .map_err(|error| Error::Render(error.to_string()))
+    }
+
+    /// Import a client's dmabuf, so it can be composited.
+    ///
+    /// The texture is dropped immediately: this is the compositor answering
+    /// "can you actually use this buffer?" at the moment the client asks, which
+    /// is the point at which the protocol lets us say no. Rendering imports it
+    /// again through the same cache when the surface is drawn.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Render`] if the buffer cannot be imported.
+    pub fn import_dmabuf(&mut self, dmabuf: &Dmabuf) -> Result<(), Error> {
+        self.gles
+            .import_dmabuf(dmabuf, None)
+            .map(|_texture| ())
+            .map_err(|error| Error::Render(error.to_string()))
     }
 
     /// Composite the space into an offscreen buffer and read it back.

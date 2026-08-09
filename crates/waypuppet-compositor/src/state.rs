@@ -6,7 +6,6 @@
 
 use std::{
     collections::HashMap,
-    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -16,10 +15,12 @@ use std::{
 
 use smithay::{
     backend::{
+        allocator::dmabuf::Dmabuf,
         input::{Axis, AxisSource, ButtonState, KeyState},
         renderer::utils::on_commit_buffer_handler,
     },
-    delegate_compositor, delegate_output, delegate_seat, delegate_shm, delegate_xdg_shell,
+    delegate_compositor, delegate_dmabuf, delegate_output, delegate_seat, delegate_shm,
+    delegate_xdg_shell,
     desktop::{Space, Window},
     input::{
         Seat, SeatHandler, SeatState,
@@ -41,6 +42,7 @@ use smithay::{
         compositor::{
             CompositorClientState, CompositorHandler, CompositorState, get_parent, with_states,
         },
+        dmabuf::{DmabufFeedbackBuilder, DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier},
         output::{OutputHandler, OutputManagerState},
         shell::xdg::{
             PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
@@ -66,6 +68,57 @@ const WHEEL_STEP: f64 = 15.0;
 
 /// One wheel click, in the `v120` units `wl_pointer` uses for discrete scrolls.
 const WHEEL_V120: i32 = 120;
+
+/// Advertise `zwp_linux_dmabuf_v1` for what `renderer` can import.
+///
+/// Not optional in practice: anything Skia-backed — which is the point of the
+/// project — renders through EGL and has nowhere to put its buffers without
+/// this. `wl_shm` stays supported for simpler clients.
+///
+/// Returns `None` when the renderer can import no dmabuf formats at all.
+/// Advertising an empty global is worse than staying quiet: a toolkit that sees
+/// the global assumes it can use it, and finding nothing usable is a harder
+/// failure to read than never having been offered it.
+fn dmabuf_global(display: &DisplayHandle, renderer: &mut Renderer) -> Option<DmabufState> {
+    let formats = renderer.dmabuf_formats();
+    if formats.iter().next().is_none() {
+        tracing::warn!("the renderer imports no dmabuf formats; not offering the global");
+        return None;
+    }
+
+    // The older path, and independent of the global below: some client stacks
+    // look for `wl_drm` before they will consider hardware buffers at all.
+    // Failing is survivable, so it is logged rather than propagated.
+    if let Err(error) = renderer.bind_wl_display(display) {
+        tracing::debug!(%error, "EGL will not answer for wl_drm buffers");
+    }
+
+    let mut state = DmabufState::new();
+    // Version 4 feedback names the device a client should allocate on, which is
+    // the answer to "which GPU?" that a bare format list cannot give. A software
+    // renderer has no node to name, so it gets the version 3 global instead —
+    // the formats are the same, only the advice is missing.
+    let global = match renderer.node() {
+        Some(node) => {
+            let feedback = DmabufFeedbackBuilder::new(node.dev_id(), formats).build();
+            match feedback {
+                Ok(feedback) => {
+                    state.create_global_with_default_feedback::<State>(display, &feedback)
+                }
+                Err(error) => {
+                    tracing::debug!(%error, "no dmabuf feedback; falling back to version 3");
+                    state.create_global::<State>(display, renderer.dmabuf_formats())
+                }
+            }
+        }
+        None => state.create_global::<State>(display, formats),
+    };
+    // The handle is only needed to disable or destroy the global, and this one
+    // lives as long as the session does.
+    let _: DmabufGlobal = global;
+
+    Some(state)
+}
 
 /// What a client gets attached to it when it connects.
 #[derive(Debug)]
@@ -163,11 +216,16 @@ pub struct State {
 
     /// Monotonic time source for frame callbacks.
     clock: Clock<Monotonic>,
-    /// Built on first capture. Deferring it keeps a session that only needs
-    /// the protocol working where EGL is unusable.
-    renderer: Option<Renderer>,
-    /// Which device to render on, from the config.
-    render_node: Option<PathBuf>,
+    /// The renderer, or why there is not one.
+    ///
+    /// Built at startup rather than on first capture, because the
+    /// `zwp_linux_dmabuf_v1` global advertises *this renderer's* formats and
+    /// has to exist before the client connects. A session whose EGL is unusable
+    /// still serves the protocol; it just says so immediately instead of at the
+    /// first `shot`.
+    renderer: Result<Renderer, String>,
+    /// `zwp_linux_dmabuf_v1`, when there is a renderer to back it.
+    dmabuf: Option<DmabufState>,
     /// The output's logical size and scale, as the control protocol reports
     /// them.
     reported: (waypuppet_proto::Size, f64),
@@ -246,6 +304,23 @@ impl State {
         let mut space = Space::default();
         space.map_output(&output, (0, 0));
 
+        // Brought up here rather than on first capture: the dmabuf global
+        // advertises this renderer's formats, and a global that appears after
+        // the client has already looked at the registry may as well not exist.
+        let mut renderer = Renderer::new(&output, config.render_node.as_deref())
+            .map_err(|error| error.to_string());
+        if let Err(why) = &renderer {
+            tracing::warn!(
+                %why,
+                "no rendering device: captures will fail and dmabuf will not be offered",
+            );
+        }
+
+        let dmabuf = renderer
+            .as_mut()
+            .ok()
+            .and_then(|renderer| dmabuf_global(&display_handle, renderer));
+
         Ok(Self {
             display_handle,
             running: true,
@@ -261,8 +336,8 @@ impl State {
             keymap,
             settling: Vec::new(),
             clock: Clock::new(),
-            renderer: None,
-            render_node: config.render_node.clone(),
+            renderer,
+            dmabuf,
             reported: (config.output, config.scale),
             connections: Arc::new(AtomicUsize::new(0)),
             output_size,
@@ -294,28 +369,28 @@ impl State {
 
     /// Composite the current state and read it back.
     ///
-    /// Brings the renderer up on first call.
-    ///
     /// # Errors
     ///
-    /// Returns [`crate::Error::NoRenderDevice`] if EGL cannot be brought up, or
-    /// [`crate::Error::Render`] if compositing or readback fails.
+    /// Returns [`crate::Error::NoRenderDevice`] if EGL could not be brought up
+    /// at startup, or [`crate::Error::Render`] if compositing or readback
+    /// fails.
     pub fn capture(&mut self) -> Result<Frame, crate::Error> {
         // Destructured so the renderer can be borrowed mutably while the space
         // and output are borrowed immutably — they are disjoint fields, but
         // only a destructuring borrow tells the compiler that.
         let Self {
             renderer,
-            render_node,
             output,
             space,
             ..
         } = self;
 
-        let renderer = match renderer {
-            Some(renderer) => renderer,
-            slot @ None => slot.insert(Renderer::new(output, render_node.as_deref())?),
-        };
+        // The startup failure is repeated verbatim rather than retried: if EGL
+        // was unusable then, nothing since has changed it, and a fresh attempt
+        // would only produce the same message more slowly.
+        let renderer = renderer
+            .as_mut()
+            .map_err(|why| crate::Error::NoRenderDevice(why.clone()))?;
 
         let frame = renderer.capture(output, space)?;
         self.send_frames();
@@ -856,6 +931,43 @@ impl BufferHandler for State {
     fn buffer_destroyed(&mut self, _buffer: &WlBuffer) {}
 }
 
+impl DmabufHandler for State {
+    fn dmabuf_state(&mut self) -> &mut DmabufState {
+        self.dmabuf
+            .as_mut()
+            .expect("the global is only created when there is a state to back it")
+    }
+
+    fn dmabuf_imported(
+        &mut self,
+        _global: &DmabufGlobal,
+        dmabuf: Dmabuf,
+        notifier: ImportNotifier,
+    ) {
+        // The client is asking whether this buffer is usable, and the protocol
+        // lets us answer honestly. Importing it now rather than discovering the
+        // problem mid-render turns "the window is blank" into a protocol-level
+        // failure the client can act on.
+        let imported = self
+            .renderer
+            .as_mut()
+            .map_err(|why| why.clone())
+            .and_then(|renderer| renderer.import_dmabuf(&dmabuf).map_err(|e| e.to_string()));
+
+        match imported {
+            Ok(()) => {
+                // Only fails if the client died between asking and being
+                // answered, which needs nothing from us.
+                let _ = notifier.successful::<Self>();
+            }
+            Err(why) => {
+                tracing::warn!(%why, "rejecting a client's dmabuf");
+                notifier.failed();
+            }
+        }
+    }
+}
+
 impl ShmHandler for State {
     fn shm_state(&self) -> &ShmState {
         &self.shm_state
@@ -941,6 +1053,7 @@ impl XdgShellHandler for State {
 }
 
 delegate_compositor!(State);
+delegate_dmabuf!(State);
 delegate_shm!(State);
 delegate_seat!(State);
 delegate_output!(State);
