@@ -33,7 +33,10 @@
 
 use std::{
     io::Write as _,
-    os::unix::{fs::FileExt as _, io::AsFd as _, net::UnixStream},
+    os::{
+        fd::{AsFd as _, AsRawFd as _},
+        unix::{fs::FileExt as _, net::UnixStream},
+    },
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, MutexGuard, PoisonError,
@@ -46,7 +49,7 @@ use std::{
 use smithay::{
     backend::allocator::{
         Allocator as _, Buffer as _, Fourcc, Modifier,
-        dmabuf::AsDmabuf as _,
+        dmabuf::{AsDmabuf as _, Dmabuf},
         gbm::{GbmAllocator, GbmBuffer, GbmBufferFlags, GbmDevice},
     },
     input::keyboard::xkb,
@@ -669,17 +672,52 @@ struct Client {
     buffer: Option<(WlShmPool, WlBuffer)>,
     /// The same, for a dmabuf paint. The gbm buffer has to outlive the commit
     /// too, or the compositor is compositing freed memory.
-    imported: Option<(Allocated, WlBuffer)>,
+    imported: Option<(Held, WlBuffer)>,
     events: Events,
 }
 
-/// A gbm buffer object and the allocator that owns its device.
-///
-/// Kept together because dropping the device invalidates the buffer, and the
-/// buffer has to survive as long as the compositor might read it.
-struct Allocated {
-    _allocator: GbmAllocator<std::fs::File>,
-    _buffer: GbmBuffer,
+/// Whatever produced the dmabuf, held for as long as the compositor might read
+/// it — dropping the allocator or the memfd underneath a committed buffer means
+/// compositing freed memory.
+enum Held {
+    /// Allocated on a render node with gbm.
+    Gbm {
+        _allocator: GbmAllocator<std::fs::File>,
+        _buffer: GbmBuffer,
+        dmabuf: Dmabuf,
+    },
+    /// Made from a sealed memfd, for machines with no render node at all.
+    Udmabuf {
+        fd: std::os::fd::OwnedFd,
+        stride: u32,
+    },
+}
+
+impl Held {
+    /// The fourcc and raw modifier to declare for this buffer.
+    fn format(&self) -> (u32, u64) {
+        match self {
+            Self::Gbm { dmabuf, .. } => {
+                let format = dmabuf.format();
+                (format.code as u32, u64::from(format.modifier))
+            }
+            // A memfd is linear by construction; there is no tiling to describe.
+            Self::Udmabuf { .. } => (Fourcc::Argb8888 as u32, u64::from(Modifier::Linear)),
+        }
+    }
+
+    /// Each plane as (fd, offset, stride). Both paths are single-plane here.
+    fn planes(&self) -> Vec<(std::os::fd::BorrowedFd<'_>, u32, u32)> {
+        match self {
+            Self::Gbm { dmabuf, .. } => dmabuf
+                .handles()
+                .zip(dmabuf.offsets())
+                .zip(dmabuf.strides())
+                .map(|((fd, offset), stride)| (fd, offset, stride))
+                .collect(),
+            Self::Udmabuf { fd, stride } => vec![(fd.as_fd(), 0, *stride)],
+        }
+    }
 }
 
 /// What the client has learned from the compositor.
@@ -898,21 +936,31 @@ impl Client {
             .pick_modifier(Fourcc::Argb8888)
             .ok_or_else(|| "the compositor advertises no Argb8888 dmabuf format".to_owned())?;
 
-        let (allocator, mut buffer) = allocate(width, height, modifier)?;
-        fill(&mut buffer, rgba)?;
-        let dmabuf = buffer
-            .export()
-            .map_err(|error| format!("the buffer cannot be exported as a dmabuf: {error}"))?;
+        // gbm where there is a render node, udmabuf where there is not. Both
+        // produce a linear buffer full of the same colour; only the allocator
+        // differs, so the import under test is identical either way.
+        let held = match allocate(width, height, modifier) {
+            Ok((allocator, mut buffer)) => {
+                fill(&mut buffer, rgba)?;
+                let dmabuf = buffer.export().map_err(|error| {
+                    format!("the buffer cannot be exported as a dmabuf: {error}")
+                })?;
+                Held::Gbm {
+                    _allocator: allocator,
+                    _buffer: buffer,
+                    dmabuf,
+                }
+            }
+            Err(gbm) => {
+                let (fd, stride) = udmabuf(width, height, rgba)
+                    .map_err(|udmabuf| format!("no gbm ({gbm}); no udmabuf ({udmabuf})"))?;
+                Held::Udmabuf { fd, stride }
+            }
+        };
 
         let params = global.create_params(&self.handle, ());
-        let format = dmabuf.format();
-        let raw = u64::from(format.modifier);
-        for (index, ((fd, offset), stride)) in dmabuf
-            .handles()
-            .zip(dmabuf.offsets())
-            .zip(dmabuf.strides())
-            .enumerate()
-        {
+        let (format_code, raw) = held.format();
+        for (index, (fd, offset, stride)) in held.planes().into_iter().enumerate() {
             #[expect(
                 clippy::cast_possible_truncation,
                 reason = "a plane index above u32::MAX is not a thing"
@@ -934,7 +982,7 @@ impl Client {
         let wl_buffer = params.create_immed(
             width,
             height,
-            format.code as u32,
+            format_code,
             zwp_linux_buffer_params_v1::Flags::empty(),
             &self.handle,
             (),
@@ -943,13 +991,7 @@ impl Client {
         self.surface.attach(Some(&wl_buffer), 0, 0);
         self.surface.damage(0, 0, width, height);
         self.surface.commit();
-        self.imported = Some((
-            Allocated {
-                _allocator: allocator,
-                _buffer: buffer,
-            },
-            wl_buffer,
-        ));
+        self.imported = Some((held, wl_buffer));
 
         // Deliberately a panic, not an `Err`. Past this point the client has
         // done everything asked of it, so a protocol error here is the
@@ -974,6 +1016,109 @@ impl Client {
             .roundtrip()
             .expect("the commit did not provoke a protocol error");
     }
+}
+
+/// Create a dmabuf out of plain memory, with no GPU involved.
+///
+/// `udmabuf(7)` turns a sealed `memfd` into a dma-buf, which is the only way to
+/// produce one on a machine with no render node — a hosted CI runner, for
+/// instance. The buffer is linear by construction, so the pixels go in with an
+/// ordinary write.
+///
+/// Returns the dmabuf fd and its stride, or a reason it could not be done.
+fn udmabuf(width: i32, height: i32, rgba: [u8; 4]) -> Result<(std::os::fd::OwnedFd, u32), String> {
+    use std::os::fd::{FromRawFd as _, OwnedFd};
+
+    // `_IOW('u', 0x42, struct udmabuf_create)`, where the struct is
+    // { u32 memfd; u32 flags; u64 offset; u64 size; } — 24 bytes.
+    const UDMABUF_CREATE: libc::c_ulong = 0x4018_7542;
+    const UDMABUF_FLAGS_CLOEXEC: u32 = 0x01;
+    // udmabuf refuses a memfd that could still shrink under it.
+    const F_SEAL_SHRINK: libc::c_int = 0x0002;
+
+    #[repr(C)]
+    struct Create {
+        memfd: u32,
+        flags: u32,
+        offset: u64,
+        size: u64,
+    }
+
+    let stride = u32::try_from(width).map_err(|_| "negative width".to_owned())? * 4;
+    let bytes =
+        u64::from(stride) * u64::try_from(height).map_err(|_| "negative height".to_owned())?;
+    // udmabuf allocates in whole pages.
+    let page = 4096;
+    let size = bytes.div_ceil(page) * page;
+
+    // `Argb8888` is 0xAARRGGBB in a little-endian word, so the bytes run B, G, R, A.
+    let [r, g, b, a] = rgba;
+    let pixel = [b, g, r, a];
+    let filled: Vec<u8> = pixel
+        .iter()
+        .copied()
+        .cycle()
+        .take(usize::try_from(bytes).map_err(|_| "buffer too large".to_owned())?)
+        .collect();
+
+    // Every call here is an unsafe libc entry point with no safe wrapper in the
+    // dependency tree. Each one is checked, the file descriptors are wrapped in
+    // `OwnedFd` as soon as they exist, and `Create` is a plain repr(C) struct
+    // passed by pointer to an ioctl that only reads it.
+    #[expect(
+        unsafe_code,
+        reason = "memfd_create, fcntl(F_ADD_SEALS) and the udmabuf ioctl have no safe wrapper here"
+    )]
+    let dmabuf = unsafe {
+        let memfd = libc::memfd_create(
+            c"waypuppet-dmabuf".as_ptr(),
+            libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
+        );
+        if memfd < 0 {
+            return Err(format!("memfd_create: {}", std::io::Error::last_os_error()));
+        }
+        let memfd = OwnedFd::from_raw_fd(memfd);
+
+        let length = libc::off_t::try_from(size).map_err(|_| "buffer too large".to_owned())?;
+        if libc::ftruncate(memfd.as_raw_fd(), length) < 0 {
+            return Err(format!("ftruncate: {}", std::io::Error::last_os_error()));
+        }
+        let written = libc::pwrite(
+            memfd.as_raw_fd(),
+            filled.as_ptr().cast::<libc::c_void>(),
+            filled.len(),
+            0,
+        );
+        if written < 0 || usize::try_from(written).unwrap_or(0) != filled.len() {
+            return Err(format!("pwrite: {}", std::io::Error::last_os_error()));
+        }
+        if libc::fcntl(memfd.as_raw_fd(), libc::F_ADD_SEALS, F_SEAL_SHRINK) < 0 {
+            return Err(format!("F_ADD_SEALS: {}", std::io::Error::last_os_error()));
+        }
+
+        let device = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/udmabuf")
+            .map_err(|error| format!("/dev/udmabuf: {error}"))?;
+
+        let create = Create {
+            memfd: u32::try_from(memfd.as_raw_fd()).map_err(|_| "bad fd".to_owned())?,
+            flags: UDMABUF_FLAGS_CLOEXEC,
+            offset: 0,
+            size,
+        };
+        let fd = libc::ioctl(device.as_raw_fd(), UDMABUF_CREATE, &raw const create);
+        if fd < 0 {
+            return Err(format!(
+                "UDMABUF_CREATE: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        OwnedFd::from_raw_fd(fd)
+    };
+
+    Ok((dmabuf, stride))
 }
 
 /// Allocate a linear gbm buffer on the first render node we may open.

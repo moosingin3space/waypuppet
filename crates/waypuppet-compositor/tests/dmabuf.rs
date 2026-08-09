@@ -47,25 +47,25 @@ const OUTPUT: Size = Size {
 const PAINT: [u8; 4] = [0xC0, 0x30, 0x80, 0xFF];
 
 #[test]
-#[ignore = "needs a DRM render node: the client allocates its buffer with gbm"]
+#[ignore = "needs a dmabuf source for the client: a DRM render node, or /dev/udmabuf"]
 fn a_dmabuf_client_is_composited() {
     composited("dmabuf", Rendering::Fastest);
 }
 
 #[test]
-#[ignore = "needs a DRM render node: the client allocates its buffer with gbm"]
+#[ignore = "needs a dmabuf source for the client: a DRM render node, or /dev/udmabuf"]
 fn a_dmabuf_client_is_composited_in_software() {
     composited("dmabuf-software", Rendering::Software);
 }
 
 #[test]
-#[ignore = "needs a DRM render node: the client allocates its buffer with gbm"]
+#[ignore = "needs a dmabuf source for the client: a DRM render node, or /dev/udmabuf"]
 fn the_two_buffer_paths_agree() {
     agree("dmabuf-vs-shm", Rendering::Fastest);
 }
 
 #[test]
-#[ignore = "needs a DRM render node: the client allocates its buffer with gbm"]
+#[ignore = "needs a dmabuf source for the client: a DRM render node, or /dev/udmabuf"]
 fn the_two_buffer_paths_agree_in_software() {
     agree("dmabuf-vs-shm-software", Rendering::Software);
 }

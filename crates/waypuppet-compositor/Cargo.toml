@@ -25,6 +25,9 @@ thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+# `udmabuf(7)`, for a client that has to produce a dmabuf on a machine with no GPU.
+# There is no safe wrapper for the ioctl anywhere in the tree.
+libc = "0.2"
 # A real Wayland client, to prove the compositor from the outside. Versions
 # match what smithay's `wayland-server` is paired with.
 tempfile = "3"
