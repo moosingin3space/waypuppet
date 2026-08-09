@@ -3,12 +3,12 @@
 How to run your GUI application's tests on a machine with no screen, no desktop session and
 — usually — no GPU.
 
-> **Status:** partly real. `doctor`, `run`, `ps`, `shot`, `logs`, `kill` and `sessions`
-> work today, so a pipeline that starts an application, screenshots it and uploads the
-> result is possible now. The input verbs and `wait` are still to come
-> ([plans 04–05](../plans/)), so the example below does not run end to end yet. The
-> constraints and the advice are real regardless — they come from how the pieces fit
-> rather than from the code.
+> **Status:** mostly real. `doctor`, `run`, `ps`, `shot`, `logs`, `kill`, `sessions` and
+> every input verb — `key`, `type`, `click`, `move`, `scroll`, `resize` — work today, and
+> are exercised against a real GTK application on every push. **`wait` does not exist yet**
+> ([plan 05](../plans/05-wait.md)), so the example below does not run as written; until it
+> lands, poll `waypuppet ps --json` for a mapped window, the way
+> [`ci/toolkit-smoke.sh`](../ci/toolkit-smoke.sh) does. Everything else here is real.
 
 ## What CI has to provide
 
@@ -73,8 +73,10 @@ usually diagnosed on sight.
 GitHub-hosted runners have no render node, so CI will use llvmpipe. Two consequences:
 
 **It is slower** — several times slower for a large window. Timeouts tuned on a laptop with
-a GPU will be tight or flaky in CI. Prefer waiting on conditions over raising timeouts:
-`wait --frames 1` after an action is both faster and more reliable than a longer deadline.
+a GPU will be tight or flaky in CI. Prefer waiting on conditions over raising timeouts —
+though note that the mutating verbs already settle on the client's next frame before they
+return, so the common case needs no wait at all. `wait --frames 1` will be the tool for the
+rest, once it exists.
 
 **It produces different pixels.** Antialiasing and filtering differ between llvmpipe and any
 GPU driver, so a screenshot taken on your machine will not be byte-identical to one taken in

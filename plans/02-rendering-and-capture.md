@@ -136,12 +136,16 @@ Nothing.
   a filter into a preference fails exactly those tests. This is the same shape as the
   dmabuf skip: a test whose subject can quietly change is a test that cannot fail.
 
-- **The `unsafe` exception is real, and it is one place.** `EGLDisplay::new` and
+- **The `unsafe` exception is real, and it is narrow.** `EGLDisplay::new` and
   `GlesRenderer::new` are both `unsafe fn`. The crate's `#![forbid(unsafe_code)]` had to
   become the workspace-level `deny`, because `forbid` cannot be overridden even locally.
-  The single `#[expect(unsafe_code, reason = …)]` lives in `Renderer::on_device`, and the
-  obligation it discharges is structural: `_display` is owned by the struct and outlives
-  everything built from it.
+  The `#[expect(unsafe_code, reason = …)]` in `Renderer::on_device` discharges a structural
+  obligation: `_display` is owned by the struct and outlives everything built from it.
+
+  There is now a second, in `tests/fixture.rs`, for the `memfd_create` / `F_ADD_SEALS` /
+  udmabuf ioctl sequence that lets a client produce a dmabuf with no GPU. Two is still a
+  number worth keeping countable — if a third is ever proposed, it should have to argue
+  against these.
 - **`Bind` borrows the target, not the renderer.** `bind<'a>(&mut self, target: &'a mut T)
   -> Framebuffer<'a>` looks like it should keep the renderer borrowed, but the returned
   lifetime is the target's. That is what makes `copy_framebuffer(&mut self, &framebuffer)`

@@ -9,9 +9,10 @@
 //!
 //! # Status
 //!
-//! [`probe`] reports what there is to render with. [`Compositor`] runs far
-//! enough for a client to connect and map a window; it does not draw anything
-//! yet. See `plans/` for what lands next.
+//! [`probe`] reports what there is to render with. [`Compositor`] hosts a real
+//! toolkit: it composites `wl_shm` and `zwp_linux_dmabuf_v1` buffers offscreen,
+//! reads frames back as PNGs, and delivers keyboard and pointer input through
+//! the seat. `wait` and the accessibility tree are what remain; see `plans/`.
 
 // Not `forbid`: `render` needs a narrowly scoped exception for smithay's
 // unsafe EGL constructors, and `forbid` cannot be overridden at all. The

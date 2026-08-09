@@ -130,6 +130,9 @@ which renders through EGL — has somewhere to put its buffers.
 A real toolkit works end to end: GTK 3's `gtk3-widget-factory` is hosted, clicked into,
 typed at, and the text appears in the next capture with no sleep anywhere.
 
+Every push is checked in a container with no GPU, which is the environment most users will
+run waypuppet in, and one job drives that GTK application end to end.
+
 **Not yet.** `wait`, the clipboard, and the accessibility tree. The transcript at the top
 of this file is still the design rather than a recording — `wait` is the part of it that
 does not work.

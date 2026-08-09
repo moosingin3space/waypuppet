@@ -216,10 +216,9 @@ pub struct State {
     /// `wl_output` plus `xdg_output`.
     pub output_manager_state: OutputManagerState,
     /// `wl_data_device_manager`. Nothing here reads or writes a selection yet —
-    /// that is [plan 06] — but the global has to exist, because GTK will not
-    /// create a seat at all without one, and a seat is where input arrives.
-    ///
-    /// [plan 06]: https://github.com/moosingin3space/waypuppet/blob/main/plans/06-clipboard-and-resize.md
+    /// that is plan 06 in `plans/` — but the global has to exist, because GTK
+    /// will not create a seat at all without one, and a seat is where input
+    /// arrives.
     pub data_device_state: DataDeviceState,
     /// Seat bookkeeping. Input injection goes through the seat below.
     pub seat_state: SeatState<Self>,

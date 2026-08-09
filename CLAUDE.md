@@ -343,10 +343,14 @@ it ever mapped a window, and everything it wrote. Input works too — `key`, `ty
 client has drawn in response.
 
 Clients may draw through `wl_shm` or `zwp_linux_dmabuf_v1`, which is what a Skia-backed
-toolkit needs.
+toolkit needs. A real one is hosted end to end: GTK 3's `gtk3-widget-factory` is started,
+clicked into and typed at, and `hello` appears in the next capture with no sleep anywhere.
+`ci/toolkit-smoke.sh` keeps it that way.
 
-Not yet: `wait` and the accessibility tree. No real toolkit has been hosted end to end
-yet, though nothing protocol-level is now known to be missing for one.
+CI runs on every push — see [`docs/project-ci.md`](docs/project-ci.md). `just ci` runs the
+same thing locally, in the same image, so "will CI agree?" does not need a push to answer.
+
+Not yet: `wait`, the clipboard, and the accessibility tree.
 
 **The roadmap lives in [`plans/`](plans/)** — one file per phase, in the order they should
 land, each with its own acceptance criteria and, once landed, what it taught us.

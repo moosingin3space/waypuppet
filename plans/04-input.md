@@ -1,6 +1,6 @@
 # 04 — Input
 
-**Status:** landed
+**Status:** done
 **Depends on:** [03](03-control-socket.md), which landed the bridge these verbs travel over
 
 ## Goal

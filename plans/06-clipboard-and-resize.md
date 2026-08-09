@@ -8,10 +8,20 @@
 The interactions a terminal multiplexer actually exercises: copy, paste, and a window that
 changes size.
 
+## Already done, and not by this phase
+
+`wl_data_device_manager` is **already advertised**, with smithay's default handlers and no
+selection support. That was not a head start on this phase — it was forced by
+[plan 04](04-input.md): GTK defers creating a seat until the data device manager appears,
+so without the global there is no keyboard at all and every keystroke goes nowhere. What is
+left here is the part that was actually about the clipboard: reading and writing
+selections, and the primary selection protocol.
+
 ## Scope
 
-- `wl_data_device` for the clipboard, and `zwp_primary_selection` for the X11-style middle
-  click selection that terminal users expect to work.
+- `wl_data_device` for the clipboard — the global exists, the *selections* do not — and
+  `zwp_primary_selection` for the X11-style middle click selection that terminal users
+  expect to work.
 - Resize by reconfiguring the `xdg_toplevel` — send a configure with the new size and let
   the client redraw, exactly as a real compositor would. Not by scaling the capture, which
   would test nothing.
@@ -20,7 +30,12 @@ changes size.
 
 ## Protocol additions
 
-The `Waypuppet` trait has `resize` already, but **nothing for the clipboard**. This phase
+`resize` is not just present on the trait, it is **implemented and settling** — plan 04
+delivered it, since it is a mutating verb like any other. What this phase adds to the
+window half is a client that resizes to something smaller than the output, which is the
+case that proves the compositing path draws a background.
+
+The trait still has **nothing for the clipboard**. This phase
 adds methods to read and write both selections, and the naming should be settled against
 how it reads at the command line: `waypuppet clipboard set 'text'` and `waypuppet clipboard
 get` are the likely verbs.
