@@ -16,7 +16,31 @@ const PAINT: [u8; 4] = [0x20, 0xC0, 0x40, 0xFF];
 
 #[test]
 fn a_committed_frame_is_captured_and_written() {
-    fixture::guarded("capture", OUTPUT, |harness| {
+    committed_frame("capture", waypuppet_compositor::Rendering::Fastest);
+}
+
+/// The same on llvmpipe, which is what a runner with no render node gets.
+///
+/// Not redundant with the test above: the software fallback is the path most of
+/// waypuppet's users and all of its CI will take, and "it works on the GPU here"
+/// says nothing about it.
+#[test]
+fn a_committed_frame_is_captured_in_software() {
+    committed_frame(
+        "capture-software",
+        waypuppet_compositor::Rendering::Software,
+    );
+}
+
+fn committed_frame(name: &'static str, rendering: waypuppet_compositor::Rendering) {
+    let wanted_software = rendering == waypuppet_compositor::Rendering::Software;
+    fixture::guarded_on(name, OUTPUT, rendering, move |harness| {
+        assert_eq!(
+            harness.renders_in_software(),
+            wanted_software,
+            "the session is not on the renderer this test asked for",
+        );
+
         let mut client = harness.start_client("capture-fixture");
         harness.configure(&mut client);
         harness.paint(&mut client, PAINT);

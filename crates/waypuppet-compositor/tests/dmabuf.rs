@@ -11,6 +11,11 @@
 //! import path ran: the global was advertised, the format was one the renderer
 //! accepts, `dmabuf_imported` said yes, and the texture composited.
 //!
+//! Every case runs twice, once on whatever renderer is fastest and once forced
+//! to llvmpipe. Those are different drivers and can disagree about which dmabuf
+//! formats they will import — and since CI has no render node, the software run
+//! is the one that reflects how most of this will actually be used.
+//!
 //! # This does not skip
 //!
 //! Allocation needs a render node the *test process* may open, and a machine
@@ -23,6 +28,7 @@
 
 mod fixture;
 
+use waypuppet_compositor::Rendering;
 use waypuppet_proto::Size;
 
 const OUTPUT: Size = Size {
@@ -37,7 +43,35 @@ const PAINT: [u8; 4] = [0xC0, 0x30, 0x80, 0xFF];
 
 #[test]
 fn a_dmabuf_client_is_composited() {
-    fixture::guarded("dmabuf", OUTPUT, |harness| {
+    composited("dmabuf", Rendering::Fastest);
+}
+
+#[test]
+fn a_dmabuf_client_is_composited_in_software() {
+    composited("dmabuf-software", Rendering::Software);
+}
+
+#[test]
+fn the_two_buffer_paths_agree() {
+    agree("dmabuf-vs-shm", Rendering::Fastest);
+}
+
+#[test]
+fn the_two_buffer_paths_agree_in_software() {
+    agree("dmabuf-vs-shm-software", Rendering::Software);
+}
+
+/// What the client wrote into a dmabuf comes back out of a capture.
+fn composited(name: &'static str, rendering: Rendering) {
+    let wanted_software = rendering == Rendering::Software;
+    fixture::guarded_on(name, OUTPUT, rendering, move |harness| {
+        assert_eq!(
+            harness.renders_in_software(),
+            wanted_software,
+            "the session is not on the renderer this test asked for, so it proves \
+             nothing about that renderer",
+        );
+
         let mut client = harness.start_client("dmabuf-fixture");
         harness.configure(&mut client);
 
@@ -64,13 +98,21 @@ fn a_dmabuf_client_is_composited() {
     });
 }
 
-#[test]
-fn a_dmabuf_client_and_an_shm_client_agree() {
-    // The two import paths have to produce the same picture, or a golden image
-    // is only valid for whichever kind of client generated it. This is the
-    // cheapest way to catch a format or byte-order mistake on one path that the
-    // other does not have.
-    fixture::guarded("dmabuf-vs-shm", OUTPUT, |harness| {
+/// `wl_shm` and dmabuf composite the same colour identically.
+///
+/// The two import paths have to produce the same picture, or a golden image is
+/// only valid for whichever kind of client generated it. This is the cheapest
+/// way to catch a format or byte-order mistake on one path that the other does
+/// not have.
+fn agree(name: &'static str, rendering: Rendering) {
+    let wanted_software = rendering == Rendering::Software;
+    fixture::guarded_on(name, OUTPUT, rendering, move |harness| {
+        assert_eq!(
+            harness.renders_in_software(),
+            wanted_software,
+            "the session is not on the renderer this test asked for",
+        );
+
         let mut client = harness.start_client("dmabuf-fixture");
         harness.configure(&mut client);
 
