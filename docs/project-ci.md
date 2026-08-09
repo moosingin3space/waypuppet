@@ -76,10 +76,15 @@ udmabuf-backed buffer and composites it correctly, and the dmabuf-versus-shm com
 passes too.
 
 So the tests stay `#[ignore]` — a machine can still have neither source — and the
-`dmabuf import` step tries `modprobe udmabuf` and runs them when it succeeds. **Whether a
-hosted runner has the module is the one thing here not verified locally.** When it does
-not, the step emits a warning annotation rather than a green tick, because "we did not test
-this" and "this passed" must not look the same.
+`dmabuf import` step tries `modprobe udmabuf` and runs them when it succeeds. Whether a
+hosted runner would load the module was the last thing here not verified, and it does:
+[run 31335278185](https://github.com/mooscodes/waypuppet/actions/runs/31335278185) loaded
+it and passed all four tests on `ubuntu-latest`. **The import path is covered on every
+push, with no GPU anywhere.**
+
+The warning fallback stays, because a runner image is not a promise. If the module ever
+goes away the step annotates the run instead of passing, because "we did not test this" and
+"this passed" must not look the same.
 
 A GPU job on a self-hosted runner is still worth having: udmabuf covers the import, but
 only for a linear buffer that a real driver never produced. Tiled modifiers and format

@@ -43,14 +43,19 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # The job name is in the key, and has to be. Both jobs once computed the same one,
+      # and a key can only be reserved once: the shorter job saved it and this one failed
+      # with "Unable to reserve cache", every run, permanently. They do not build the same
+      # thing either — this job builds the test binaries, the other builds the CLI — so
+      # sharing a key traded a cache that fits for one that does not.
       - name: Cache cargo
         uses: actions/cache@v4
         with:
           path: |
             ci/.cache/cargo
             ci/.cache/target
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'ci/Containerfile') }}
-          restore-keys: cargo-${{ runner.os }}-
+          key: cargo-check-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'ci/Containerfile') }}
+          restore-keys: cargo-check-${{ runner.os }}-
 
       # Every step below is exactly what `ci/run.sh` does locally, which is the point:
       # there is no CI-only incantation for a failure to hide behind.
@@ -70,9 +75,10 @@ jobs:
       # render node — but udmabuf turns a sealed memfd into a dma-buf with no GPU at all,
       # which is verified to work end to end with no /dev/dri present.
       #
-      # Whether a hosted runner will load the module is the one link in this file that was
-      # not verified locally. So: try, and if it is not there, say so loudly in the run
-      # summary rather than reporting a green tick for something nobody tested.
+      # A hosted runner does load the module: run 31335278185 ran these four tests and
+      # passed them, which was the last open question here. The fallback stays anyway,
+      # because a runner image is not a promise — and if the module ever goes away, saying
+      # so loudly beats reporting a green tick for something nobody tested.
       #
       # The node is created root-owned and restrictive. That does not matter here, because
       # docker's daemon is root and the container is too, which is verified: these four
@@ -125,8 +131,8 @@ jobs:
           path: |
             ci/.cache/cargo
             ci/.cache/target
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'ci/Containerfile') }}
-          restore-keys: cargo-${{ runner.os }}-
+          key: cargo-toolkit-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'ci/Containerfile') }}
+          restore-keys: cargo-toolkit-${{ runner.os }}-
 
       # The unit suite drives the compositor with a fixture that is better behaved than any
       # real client, and every bug that stopped GTK working got past it for that reason.
