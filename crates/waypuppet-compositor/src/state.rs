@@ -10,7 +10,7 @@ use std::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use smithay::{
@@ -74,6 +74,20 @@ const WHEEL_STEP: f64 = 15.0;
 
 /// One wheel click, in the `v120` units `wl_pointer` uses for discrete scrolls.
 const WHEEL_V120: i32 = 120;
+
+/// How often `wl_surface.frame` callbacks are answered.
+///
+/// 16ms, matching the 60Hz the output advertises. Clients throttle their
+/// drawing on these callbacks: one is requested before a commit, and the next
+/// frame is not drawn until it fires. A compositor that only answers them when
+/// somebody takes a screenshot therefore gets exactly one frame out of any real
+/// toolkit and then nothing, which looks from the outside like an application
+/// that has hung.
+///
+/// This does not make rendering periodic — a capture still draws on demand, and
+/// determinism depends on that, not on this. Pacing a client is a separate job
+/// from drawing a frame.
+const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
 /// Advertise `zwp_linux_dmabuf_v1` for what `renderer` can import.
 ///
@@ -225,6 +239,8 @@ pub struct State {
     keymap: Keymap,
     /// Replies waiting on a client frame.
     settling: Vec<Settling>,
+    /// When frame callbacks were last answered, for [`FRAME_INTERVAL`].
+    last_frames: Instant,
 
     /// Monotonic time source for frame callbacks.
     clock: Clock<Monotonic>,
@@ -349,6 +365,7 @@ impl State {
             records: HashMap::new(),
             keymap,
             settling: Vec::new(),
+            last_frames: Instant::now(),
             clock: Clock::new(),
             renderer,
             dmabuf,
@@ -413,7 +430,9 @@ impl State {
             .map_err(|why| crate::Error::NoRenderDevice(why.clone()))?;
 
         let frame = renderer.capture(output, space)?;
+        // A capture is as good a presentation as a paced one, so it counts.
         self.send_frames();
+        self.last_frames = Instant::now();
         Ok(frame)
     }
 
@@ -466,6 +485,17 @@ impl State {
             scale,
             windows,
             connections: self.connections.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Answer frame callbacks if enough time has passed since the last batch.
+    ///
+    /// Called every loop iteration. Without it a client draws once and waits
+    /// forever for a callback that only a screenshot would send.
+    pub fn pace_frames(&mut self) {
+        if self.last_frames.elapsed() >= FRAME_INTERVAL {
+            self.send_frames();
+            self.last_frames = Instant::now();
         }
     }
 

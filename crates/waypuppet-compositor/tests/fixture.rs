@@ -57,6 +57,7 @@ use wayland_client::{
     globals::{GlobalListContents, registry_queue_init},
     protocol::{
         wl_buffer::WlBuffer,
+        wl_callback::{self, WlCallback},
         wl_compositor::WlCompositor,
         wl_keyboard::{self, KeyState, KeymapFormat, WlKeyboard},
         wl_pointer::{self, ButtonState, WlPointer},
@@ -399,6 +400,17 @@ impl Harness {
         }
     }
 
+    /// Have the client request a frame callback and wait for it.
+    ///
+    /// # Panics
+    ///
+    /// Panics after [`WAIT_LIMIT`] if no callback arrives, which is what a
+    /// compositor that never paces its clients looks like from here.
+    pub fn await_frame(&mut self, client: &mut ClientThread) {
+        client.send(ClientCommand::AwaitFrame);
+        self.await_reply(client, "a frame callback");
+    }
+
     /// Have the client fill its window with one colour and commit it.
     ///
     /// # Panics
@@ -572,6 +584,8 @@ enum ClientCommand {
     PaintDmabuf([u8; 4]),
     /// Report the input received since the last drain.
     Drain,
+    /// Request a frame callback and block until the compositor answers it.
+    AwaitFrame,
     /// Disconnect and finish.
     Stop,
 }
@@ -616,6 +630,10 @@ fn client_thread(
             }
             ClientCommand::PaintDmabuf(rgba) => Reply::Painted(client.paint_dmabuf(size, rgba)),
             ClientCommand::Drain => Reply::Input(client.drain()),
+            ClientCommand::AwaitFrame => {
+                client.await_frame();
+                Reply::Done
+            }
             ClientCommand::Stop => {
                 let _ = replies.send(Reply::Done);
                 return;
@@ -679,6 +697,8 @@ struct Events {
     input: Vec<Input>,
     /// The dmabuf format and modifier pairs the compositor advertised.
     dmabuf_formats: Vec<(u32, Modifier)>,
+    /// How many `wl_surface.frame` callbacks have fired.
+    frames: u32,
 }
 
 impl Events {
@@ -809,6 +829,23 @@ impl Client {
             buffer: None,
             imported: None,
             events: Events::default(),
+        }
+    }
+
+    /// Ask to be told when this frame is presented, and wait for the answer.
+    ///
+    /// This is how every real toolkit paces itself: a callback is requested
+    /// before a commit, and the next frame is not drawn until it fires. Waiting
+    /// on it here is safe for the usual harness reason — the compositor is
+    /// being ticked by whoever is waiting on this client.
+    fn await_frame(&mut self) {
+        self.events.frames = 0;
+        self.surface.frame(&self.handle, ());
+        self.surface.commit();
+        while self.events.frames == 0 {
+            self.queue
+                .blocking_dispatch(&mut self.events)
+                .expect("the connection is healthy");
         }
     }
 
@@ -1120,6 +1157,21 @@ impl Dispatch<XdgToplevel, ()> for Events {
     ) {
         if let xdg_toplevel::Event::Configure { width, height, .. } = event {
             state.configured = Some((width, height));
+        }
+    }
+}
+
+impl Dispatch<WlCallback, ()> for Events {
+    fn event(
+        state: &mut Self,
+        _callback: &WlCallback,
+        event: wl_callback::Event,
+        _data: &(),
+        _connection: &Connection,
+        _handle: &QueueHandle<Self>,
+    ) {
+        if matches!(event, wl_callback::Event::Done { .. }) {
+            state.frames += 1;
         }
     }
 }

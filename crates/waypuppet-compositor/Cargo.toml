@@ -54,3 +54,7 @@ path = "tests/input.rs"
 [[test]]
 name = "dmabuf"
 path = "tests/dmabuf.rs"
+
+[[test]]
+name = "frames"
+path = "tests/frames.rs"

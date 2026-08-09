@@ -296,6 +296,9 @@ impl Compositor {
             .map_err(|error| Error::Compositor(error.to_string()))?;
 
         self.state.space.refresh();
+        // Clients throttle their drawing on frame callbacks, so this is what
+        // lets a real toolkit draw more than its first frame.
+        self.state.pace_frames();
         // A caller that hit its settle timeout dropped its receiver; sweeping
         // here is what keeps those entries from accumulating.
         self.state.prune_settling();
