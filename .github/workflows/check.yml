@@ -1,0 +1,115 @@
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A newer push makes an in-flight run's answer irrelevant.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: lint and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Built here rather than pulled from a registry. A pushed image would be faster, but
+      # it cannot be written by a pull request from a fork, and the first run of a fresh
+      # checkout would have nothing to pull. The layer cache gets most of the speed back
+      # and neither of those problems exists.
+      - name: Build the CI image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ci/Containerfile
+          tags: waypuppet-ci:local
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ci/.cache/cargo
+            ci/.cache/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'ci/Containerfile') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      # Every step below is exactly what `ci/run.sh` does locally, which is the point:
+      # there is no CI-only incantation for a failure to hide behind.
+      - name: Formatting
+        run: ci/run.sh cargo fmt --all --check
+
+      - name: Clippy
+        run: ci/run.sh cargo clippy --workspace --all-targets
+
+      # No `--include-ignored`. `tests/dmabuf.rs` needs a DRM render node for its *client*
+      # half to allocate with gbm, and a GitHub-hosted runner has no /dev/dri. Those tests
+      # report as ignored, with the reason, rather than being quietly absent.
+      - name: Tests
+        run: ci/run.sh cargo test --workspace
+
+      # A runner has no render node, so this must report software and nothing else. If it
+      # ever reports hardware here, the assumption the rest of this file rests on has
+      # changed and should be noticed deliberately.
+      - name: Rendering devices
+        run: |
+          ci/run.sh cargo run --quiet -p waypuppet -- doctor | tee devices.txt
+          grep -q software devices.txt
+          if grep -q hardware devices.txt; then
+            echo "a hardware device appeared on a hosted runner; see docs/project-ci.md" >&2
+            exit 1
+          fi
+
+  toolkit:
+    name: real toolkit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build the CI image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ci/Containerfile
+          tags: waypuppet-ci:local
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ci/.cache/cargo
+            ci/.cache/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'ci/Containerfile') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      # The unit suite drives the compositor with a fixture that is better behaved than any
+      # real client, and every bug that stopped GTK working got past it for that reason.
+      # This job hosts an actual toolkit and checks that driving it changes the picture.
+      - name: Drive GTK under waypuppet
+        run: ci/run.sh ci/toolkit-smoke.sh
+
+      # The captures are the diagnosis when this fails. A screenshot of the moment it went
+      # wrong is worth more than any amount of log.
+      - name: Upload captures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: toolkit-captures
+          path: ci/.cache/smoke/
+          if-no-files-found: warn
