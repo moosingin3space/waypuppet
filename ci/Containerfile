@@ -1,0 +1,100 @@
+# The image waypuppet's own CI builds and tests in.
+#
+# Locally every recipe runs inside org.freedesktop.Sdk via `flatpak run`, which exists to
+# remove a variable: contributors are on different distributions and should not each have
+# to work out which -devel packages produce a linkable libwayland-server.so. CI does not
+# have that problem — a runner is already a fresh container — and reproducing the Flatpak
+# layer there costs a gigabyte a run and needs privileges a CI job should not have.
+#
+# So this image stands in for the SDK, and the risk that replaces it is drift: if CI links
+# a different libwayland than the SDK ships, CI stops predicting anything. The mitigation
+# is that this file installs exactly the library set CLAUDE.md's Toolchain section names,
+# and nothing else, so there is one list to keep honest rather than two.
+#
+# The toolchain still comes from mise and mise.toml, the same as locally. That part does
+# not drift, because it is literally the same file.
+
+FROM docker.io/library/debian:trixie-slim
+
+# Fail the build on the first bad command in a pipeline rather than the last.
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# The system libraries, matching CLAUDE.md's Toolchain section:
+#
+#   libwayland-server  the protocol implementation smithay builds on
+#   EGL + GLES         headless rendering; the mesa DRI drivers below provide llvmpipe
+#   GBM                allocates the offscreen render target and backs the dmabuf global
+#   libdrm             pulled in by gbm, and by DrmNode
+#   xkbcommon          the keymap the seat sends and the reverse index resolves against
+#   clang              gbm-sys generates its bindings with bindgen, which needs libclang
+#
+# mesa-libgallium and libgl1-mesa-dri carry the software rasteriser. Without them EGL
+# initialises and then reports no devices, which looks identical to a missing --device=dri
+# and is the single most confusing way for this image to be wrong.
+RUN apt-get update \
+    && apt-get install --no-install-recommends --yes \
+        build-essential \
+        pkg-config \
+        ca-certificates \
+        curl \
+        git \
+        libwayland-dev \
+        libxkbcommon-dev \
+        libegl-dev \
+        libgles-dev \
+        libgbm-dev \
+        libdrm-dev \
+        libgl1-mesa-dri \
+        libegl-mesa0 \
+        clang \
+        libclang-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# GTK 3 and a font, for the job that drives a real toolkit under waypuppet.
+#
+# Not optional decoration: every bug that a real application found — a missing global that
+# stopped GTK creating a seat, frame callbacks that were never sent — got past the whole
+# unit suite, because the wl_shm test fixture is better behaved than a toolkit. The font is
+# here because without one a capture comes back full of empty boxes, silently.
+RUN apt-get update \
+    && apt-get install --no-install-recommends --yes \
+        libgtk-3-0 \
+        gtk-3-examples \
+        fonts-dejavu-core \
+    && rm -rf /var/lib/apt/lists/*
+
+# mise supplies the compiler, from the same mise.toml the Justfile uses locally, so the
+# pinned toolchain has one source rather than two.
+ENV MISE_DATA_DIR=/opt/mise
+ENV MISE_INSTALL_PATH=/usr/local/bin/mise
+ENV PATH=/opt/mise/shims:$PATH
+# The checkout is trusted up front. mise's trust store lives in a home directory that a CI
+# run has no reason to persist, so without this every shim call fails as untrusted — which
+# reads as a broken toolchain rather than a missing opt-in.
+ENV MISE_TRUSTED_CONFIG_PATHS=/workspace
+RUN curl --fail --silent --show-error --location https://mise.run | sh
+
+# Installed at build time so a CI run does not spend minutes fetching a toolchain. This is
+# what pins the image to a particular `stable`: rebuilding the image is how the compiler
+# moves, which is the reproducible direction for that to happen in.
+COPY mise.toml /tmp/waypuppet/mise.toml
+RUN mise trust /tmp/waypuppet/mise.toml \
+    && mise install --cd /tmp/waypuppet \
+    && rm -rf /tmp/waypuppet
+
+# Checked at build time rather than discovered in a failing test: an image whose EGL cannot
+# see the software renderer is broken in a way that reads as a waypuppet bug.
+RUN test -f /usr/lib/x86_64-linux-gnu/dri/swrast_dri.so \
+    || test -f /usr/lib/x86_64-linux-gnu/dri/kms_swrast_dri.so \
+    || (echo "no software DRI driver: EGL will report no devices" >&2 && exit 1)
+
+# Wayland puts its socket under XDG_RUNTIME_DIR, and a container image sets no such thing.
+# Without it the compositor cannot listen and every test that hosts a client fails at
+# startup with a message about an environment variable, which is a long way from the
+# rendering problem it looks like.
+ENV XDG_RUNTIME_DIR=/tmp/waypuppet-runtime
+RUN mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
+
+WORKDIR /workspace

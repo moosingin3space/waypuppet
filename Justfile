@@ -75,8 +75,12 @@ doctor: (sdk "cargo run -p waypuppet -- doctor")
 # Do not add a `--` separator; this recipe already supplies one.
 cli +args="--help": (sdk ("cargo run -p waypuppet -- " + args))
 
-# Run the full test suite.
-test: (sdk "cargo test --workspace")
+# `--include-ignored` picks up `tests/dmabuf.rs`, whose *client* half allocates with gbm
+# and so needs a `/dev/dri/renderD*`. The sandbox is given one with `--device=dri`; a
+# GitHub runner has none, which is why those tests declare the precondition instead of
+# discovering it.
+[doc("Run the full test suite, including the tests that need a render node.")]
+test: (sdk "cargo test --workspace -- --include-ignored")
 
 # Clippy + fmt check, matching CI expectations.
 lint: (sdk "cargo clippy --workspace --all-targets") (sdk "cargo fmt --all --check")
@@ -97,3 +101,20 @@ shell:
 nested:
     flatpak run {{ sandbox_args }} --socket=wayland --command=bash {{ sdk }} \
         -c '{{ sandbox_prelude }} eval "$(mise activate bash)"; exec bash'
+
+# The Flatpak path above is the inner loop; this is the answer to "will CI agree?" without
+# pushing to find out. It needs podman or docker, builds `ci/Containerfile` on first use,
+# and keeps its cargo cache under `ci/.cache` so the two builds do not invalidate each
+# other.
+[doc("Run what CI runs, in the image CI runs it in.")]
+ci:
+    ci/run.sh cargo fmt --all --check
+    ci/run.sh cargo clippy --workspace --all-targets
+    ci/run.sh cargo test --workspace
+    ci/run.sh cargo run --quiet -p waypuppet -- doctor
+
+# The unit suite proves the protocol against a fixture that behaves better than any real
+# toolkit. This proves the thing the fixture cannot.
+[doc("Drive a real GTK application under waypuppet, in the CI image.")]
+toolkit:
+    ci/run.sh ci/toolkit-smoke.sh
