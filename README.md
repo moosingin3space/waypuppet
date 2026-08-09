@@ -127,9 +127,12 @@ and each one returns only once the client has drawn in response.
 Clients may draw through `wl_shm` or `zwp_linux_dmabuf_v1`, so anything Skia-backed —
 which renders through EGL — has somewhere to put its buffers.
 
-**Not yet.** `wait`, the clipboard, and the accessibility tree. No real toolkit has been
-hosted end to end yet, though nothing protocol-level is now known to be missing for one.
-The transcript at the top of this file is the design, not a recording.
+A real toolkit works end to end: GTK 3's `gtk3-widget-factory` is hosted, clicked into,
+typed at, and the text appears in the next capture with no sleep anywhere.
+
+**Not yet.** `wait`, the clipboard, and the accessibility tree. The transcript at the top
+of this file is still the design rather than a recording — `wait` is the part of it that
+does not work.
 
 [CLAUDE.md] has the architecture, [plans/](plans/) has one file per phase with its status
 and what it taught us, and [docs/](docs/) covers using waypuppet in CI.

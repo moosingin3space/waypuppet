@@ -26,7 +26,8 @@ screenshotted and stopped. What is left of them is listed in each plan's "Still 
 
 04 has landed as well: input goes through the seat and every mutating verb settles on the
 client's next frame, which is what makes `click` followed by `shot` correct with nothing in
-between. 05 is what remains of making waypuppet trustworthy rather than merely possible —
+between. It is verified against GTK 3 rather than only against waypuppet's own fixture,
+which is what turned up the two things the fixture was too well-behaved to catch. 05 is what remains of making waypuppet trustworthy rather than merely possible —
 waiting on facts instead of sleeping, reusing the parked-sender machinery 04 built. 06 and
 07 are driven by
 [example-app](../../example-app) specifically. 08 is numbered last but not ranked last: it only

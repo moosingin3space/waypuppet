@@ -102,6 +102,13 @@ everything that affects rasterisation is pinned:
   `serve`, and `run --detach` forwards it to the session it starts.
 - **Pin your fonts.** waypuppet does not draw your text; your toolkit does, with whatever
   fonts the container has. Install them explicitly rather than inheriting them.
+
+  Worth knowing what the failure looks like, because it is silent: every glyph renders as
+  an empty box, the layout is otherwise perfect, and nothing appears in any log. It is also
+  not always a missing font — the same symptom came from a `PATH` the toolkit inherited
+  from the process that launched it, with the identical binary rendering correctly when
+  launched from a clean shell. If your captures come back full of boxes, compare the
+  environment your application is spawned into, not just the fonts installed.
 - **Compare with a tolerance.** Exact equality is achievable within one renderer but brittle
   across driver updates. A small per-pixel tolerance with a failure threshold on the
   proportion of differing pixels is the usual compromise.

@@ -165,6 +165,28 @@ startup instead of at the first `shot`, and offers no dmabuf global. `DmabufHand
 dmabuf_imported` imports each buffer and answers the `ImportNotifier` honestly, so a client
 finds out at the moment it asks rather than by getting a blank window.
 
+### Frame callbacks are pacing, not rendering
+
+A toolkit requests a `wl_surface.frame` callback before it commits and will not draw again
+until it fires. waypuppet sent them only from `capture`, on the reasoning that rendering is
+on demand — which conflated two different jobs and made every real toolkit look hung: GTK
+mapped a window, drew one frame, and then ignored input forever.
+
+They are now answered from the event loop at the 60Hz the output advertises. Rendering is
+still on demand, and determinism still rests on that; pacing a client is a separate
+obligation that has to be met whether or not anyone is capturing.
+
+### The `wl_shm` fixture is not a toolkit
+
+Two bugs got past the whole suite because the test client does what it is told rather than
+what a real client does: it never waits on a frame callback, and it does not need a seat to
+exist before it can receive input. GTK does both. When something works in `tests/` and not
+in a real application, suspect the fixture's good manners first.
+
+The concrete case: GTK will not create a seat at all unless `wl_data_device_manager` is
+advertised, so the clipboard global — filed under plan 06 as unrelated — turned out to gate
+all keyboard input. It is advertised now, with default handlers and no selection support.
+
 ### Forcing software rendering is a filter, not a preference
 
 `Config::rendering` is a `Rendering` — `Fastest`, `Software`, or `Device(path)` — and

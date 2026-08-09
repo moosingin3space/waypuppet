@@ -101,10 +101,34 @@ only once the client has drawn the result.
   remains the backstop for a compositor thread that dies. Abandoned senders — a caller that
   hit its own timeout — are swept each tick using `Sender::is_closed`.
 
-## Not verified here
+## Verified against a real toolkit
 
-`type 'hello'` into a real text field, from the "Done when" list above, is still open:
-nothing that renders through EGL can be hosted until `zwp_linux_dmabuf_v1` lands, so there
-is no toolkit to type into yet. The wire-level claim — that the right keysyms arrive in the
-right order, resolved through the keymap the compositor actually sent — is covered by
-`tests/input.rs`.
+`gtk3-widget-factory` — GTK 3, from the Flatpak SDK — was hosted, clicked into and typed
+at, and the next capture shows `hello` in the text field with the caret after it. No
+sleeps: `click` and `type` each returned once GTK had drawn. That closes the last item in
+"Done when", with a real toolkit rather than `example-app-app`, which does not exist yet.
+
+Two defects had to be fixed first, and neither was visible from the test suite, because the
+`wl_shm` fixture does not behave like a toolkit.
+
+- **No `wl_data_device_manager`, so GTK created no seat at all.** The clipboard global was
+  filed under [plan 06](06-clipboard-and-resize.md) as a separate concern. It is not: GTK
+  defers seat creation until the data device manager appears, so without it there is no
+  `wl_seat` bind, no keyboard, and every keystroke goes nowhere. The only symptom was
+  `gdk_seat_get_keyboard: assertion 'GDK_IS_SEAT (seat)' failed` in the client's stderr —
+  which waypuppet captured and handed back, which is the one part of this that went right.
+  The global is now advertised with the default handlers; reading and writing selections is
+  still plan 06.
+
+- **Frame callbacks were only sent from `capture`.** A toolkit requests a
+  `wl_surface.frame` callback before committing and does not draw again until it fires, so
+  GTK drew exactly one frame and then stopped — every verb after that failed as
+  `NotSettled`, blaming an application that was doing precisely what the protocol says. The
+  callbacks are now paced from the event loop at the 60Hz the output advertises.
+
+  Worth being clear about what this does *not* change: rendering is still on demand, and
+  that is what determinism rests on. Pacing a client and drawing a frame are different
+  jobs, and only the second one is a capture.
+
+`tests/frames.rs` covers the second, and the fixture's required-globals check covers the
+first. Both were confirmed by breaking them.
