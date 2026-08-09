@@ -17,8 +17,8 @@ instead.
 | 03 | [Control socket](03-control-socket.md) — `run`, `ps`, `shot`, `logs`, `kill` | mostly done |
 | 04 | [Input](04-input.md) — `key`, `type`, `click`, `move`, `scroll` | **done** |
 | 05 | [Wait](05-wait.md) — block on protocol facts, not on sleeps | **done** |
-| 06 | [Clipboard and resize](06-clipboard-and-resize.md) — what a terminal exercises | not started |
-| 07 | [Accessibility tree](07-accessibility-tree.md) — semantic selectors | not started |
+| 06 | [Clipboard and resize](06-clipboard-and-resize.md) — what a terminal exercises | **done** |
+| 07 | [Accessibility tree](07-accessibility-tree.md) — semantic selectors | spiked |
 | 08 | [Sandbox autonomy](08-sandbox-autonomy.md) — the caller never types `flatpak run` | not started |
 
 Phases 01–03 were the spine, and they have landed: a session can be started, hosted,
@@ -34,9 +34,19 @@ frames. Between them they are what makes waypuppet trustworthy rather than merel
 there is now no sleep used for synchronisation anywhere in the project, including in the
 smoke test that drives a real GTK application.
 
-06 and 07 are driven by [example-app](../../example-app) specifically. 08 is numbered last but not
-ranked last: it only needs 03, and it is what decides whether waypuppet is pleasant to reach
-for or a thing you have to remember how to set up.
+06 has landed too: both selections move in both directions, over pipes driven by the event
+loop rather than read inline, and a window can now be smaller than the output.
+
+07 is **spiked but not implemented**, which is what its own plan asked for. The uncertain
+part is settled — an AccessKit application does come up against a bus carrying only the two
+names waypuppet would own, and a ninety-line throwaway registry read its whole tree back.
+What is left is a deliberate choice about where the bus comes from, and the plan sets out
+the three options. It is a decision, not a discovery.
+
+08 is numbered last but not ranked last: it only needs 03, and it is what decides whether
+waypuppet is pleasant to reach for or a thing you have to remember how to set up. It is now
+also what gates checking any of this against [example-app](../../example-app) itself, which is the
+test that would most directly justify the project.
 
 `zwp_linux_dmabuf_v1` has landed, so a client that renders through EGL now has somewhere
 to put its buffers and a real toolkit can be tried. What is left in

@@ -33,7 +33,9 @@ use std::{
 
 use calloop::ping::Ping;
 use tokio::sync::{mpsc, oneshot};
-use waypuppet_proto::{Button, Condition, Failure, Point, Settled, Size, Target, Window};
+use waypuppet_proto::{
+    Button, Condition, Failure, Point, Selection, Settled, Size, Target, Window,
+};
 
 use crate::Frame;
 
@@ -169,6 +171,29 @@ pub enum Command {
         target: Target,
         /// Reply after the client settles.
         reply: oneshot::Sender<Result<(), Failure>>,
+    },
+    /// Offer text to the client as a selection.
+    ///
+    /// Answered immediately: owning a selection is just bookkeeping on the
+    /// seat. The transfer happens later, if the client ever asks to read it.
+    ClipboardSet {
+        /// Which selection to take ownership of.
+        selection: Selection,
+        /// The text to offer.
+        text: String,
+        /// Reply once the seat owns it.
+        reply: oneshot::Sender<Result<(), Failure>>,
+    },
+    /// Read a selection back as text.
+    ///
+    /// Usually *not* answerable on the spot: when a client owns the selection,
+    /// waypuppet hands it a pipe and the client writes down it whenever it
+    /// feels like it. The reply is parked on that transfer.
+    ClipboardGet {
+        /// Which selection to read.
+        selection: Selection,
+        /// Reply once the transfer finishes.
+        reply: oneshot::Sender<Result<Option<String>, Failure>>,
     },
     /// Park a reply until a fact the compositor observes is true.
     ///

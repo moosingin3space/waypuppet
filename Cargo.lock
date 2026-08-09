@@ -1703,6 +1703,7 @@ dependencies = [
  "libc",
  "png",
  "regex",
+ "rustix 1.1.4",
  "smithay",
  "tarpc",
  "tempfile",

@@ -101,6 +101,21 @@ pub struct Rect {
     pub size: Size,
 }
 
+/// Which of the two selections a clipboard request is about.
+///
+/// Wayland has both, and a terminal exercises both: [`Selection::Clipboard`] is
+/// what an explicit copy fills, and [`Selection::Primary`] is the X11-style
+/// select-then-middle-click one that terminal users expect to work.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Selection {
+    /// The ordinary clipboard, filled by copy and read by paste.
+    #[default]
+    Clipboard,
+    /// The primary selection, filled by selecting text.
+    Primary,
+}
+
 /// A condition to block on.
 ///
 /// Conditions describe protocol-level facts the host observes directly, which
@@ -290,6 +305,15 @@ pub enum Failure {
     /// Rendering or writing the capture failed.
     #[error("capture failed: {0}")]
     Capture(String),
+    /// A selection could not be read or written.
+    ///
+    /// Transfers are fd-based and cooperative: the other side may offer a type
+    /// nobody asked for, write something that is not text, or hand over a pipe
+    /// and never fill it. None of those is waypuppet failing, and none of them
+    /// is an empty clipboard either — which is why this is distinct from a
+    /// successful [`Waypuppet::clipboard_get`] returning `None`.
+    #[error("clipboard transfer failed: {0}")]
+    Clipboard(String),
     /// The compositor loop stopped making progress.
     ///
     /// **This is a bug in waypuppet, not in the application under test.** It is
@@ -365,6 +389,26 @@ pub trait Waypuppet {
     /// pointless: a pattern that will not compile, or a window that has gone
     /// away with the wait still counting its frames.
     async fn wait(condition: Condition, timeout: Duration) -> Result<Settled, Failure>;
+
+    /// Offer `text` to the client as the given selection.
+    ///
+    /// waypuppet becomes the selection's owner, so the client sees a paste
+    /// arrive from the compositor exactly as it would from another application.
+    /// That is a genuinely different thing from [`Waypuppet::write`]: a
+    /// terminal distinguishes a paste from typing — bracketed paste exists for
+    /// precisely that reason — so both are worth having.
+    async fn clipboard_set(selection: Selection, text: String) -> Result<(), Failure>;
+
+    /// Read the given selection as UTF-8 text.
+    ///
+    /// `None` means nothing owns the selection, which is an ordinary answer
+    /// rather than a failure. A selection that exists but cannot be had as text
+    /// is [`Failure::Clipboard`], because "there is nothing" and "there is
+    /// something you cannot read" call for different reactions.
+    ///
+    /// Reads the selection whether the client set it or waypuppet did, so
+    /// `clipboard_set` followed by `clipboard_get` round-trips.
+    async fn clipboard_get(selection: Selection) -> Result<Option<String>, Failure>;
 
     /// Fetch the accessibility tree the client publishes over AT-SPI.
     async fn tree(target: Target) -> Result<Node, Failure>;

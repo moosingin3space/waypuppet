@@ -177,6 +177,25 @@ condition it cannot see. The first draft passed all five conditions to the compo
 needed a "cannot happen" arm — and an arm that cannot happen is an arm that answers wrongly
 when it does.
 
+### A transfer is an event source, not a read
+
+Clipboard transfers are fd-based and cooperative: reading a selection means handing the
+client a pipe it fills whenever it likes, and writing one means filling a pipe the client
+drains whenever it likes. Neither can happen inline on the compositor thread, so both are
+calloop sources carrying their payload across wake-ups, and both fds are made non-blocking
+first. `rustix` is a dependency for exactly one call — `fcntl(F_SETFL, O_NONBLOCK)` — because
+`std::io::pipe` gives no way to do it and there is no acceptable amount of blocking here.
+
+Reads are tracked in `State`; writes are not. A read has a parked reply, so an abandoned one
+must be reachable for `prune_parked` to close its pipe. A write ends by itself: when the
+client stops reading, it fails with `EPIPE` and unregisters. Note also that finishing a write
+means *removing the source*, because dropping the fd is the EOF the reader is waiting for —
+leaving it registered hangs the client instead.
+
+The general shape: **anything cooperative belongs on the loop.** The rule that the compositor
+must never block on a request covers waiting for a client to draw; it covers waiting for a
+client to write down a pipe in exactly the same way and for exactly the same reason.
+
 ### Track lifecycles, not counts
 
 `State::clients` is a `HashSet<ClientId>`, not a counter, and arrival is recorded where
@@ -422,6 +441,10 @@ already true returns immediately. `--windows` and `--title` are the dependable o
 `--frames` and `--idle` carry stated caveats, because frames arrive whether or not the
 caller caused them and anything with a spinner is never idle.
 
+The clipboard works both ways, for both selections: `waypuppet clipboard set` offers text
+the application can paste, and `clipboard get` reads what the application owns. Verified
+against GTK 3 in both directions.
+
 There is now **no sleep used for synchronisation anywhere in the project**, including
 `ci/toolkit-smoke.sh`, which drives a real GTK application. `tests/stall.rs` sleeps because
 sleeping is the fault under test, and two socket polls check the condition they wait on
@@ -430,7 +453,10 @@ rather than guessing at it; a sleep standing in for a condition is a bug.
 CI runs on every push — see [`docs/project-ci.md`](docs/project-ci.md). `just ci` runs the
 same thing locally, in the same image, so "will CI agree?" does not need a push to answer.
 
-Not yet: the clipboard and the accessibility tree.
+Not yet: the accessibility tree. [Plan 07](plans/07-accessibility-tree.md) has been spiked
+and works — an AccessKit application activates against a bus carrying only the two names
+waypuppet would own, and a throwaway registry read its whole tree back. What is left is a
+choice about where the D-Bus session comes from, which that plan sets out.
 
 **The roadmap lives in [`plans/`](plans/)** — one file per phase, in the order they should
 land, each with its own acceptance criteria and, once landed, what it taught us.

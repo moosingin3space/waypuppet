@@ -31,8 +31,8 @@ use tarpc::{
 };
 use tokio::sync::Notify;
 use waypuppet_proto::{
-    Button, Capture, ClientState, Condition, Cursor, Failure, LogChunk, Node, Point, SessionStatus,
-    Settled, Size, Target, Waypuppet,
+    Button, Capture, ClientState, Condition, Cursor, Failure, LogChunk, Node, Point, Selection,
+    SessionStatus, Settled, Size, Target, Waypuppet,
 };
 
 use crate::{Command, Commands, Compositor, Config, Error, Watching};
@@ -599,6 +599,40 @@ impl Waypuppet for Server {
             }
             Watching::Exit => self.wait_for_exit(timeout).await,
         }
+    }
+
+    async fn clipboard_set(
+        self,
+        _: Context,
+        selection: Selection,
+        text: String,
+    ) -> Result<(), Failure> {
+        self.0
+            .commands
+            .ask(COMPOSITOR_DEADLINE, |reply| Command::ClipboardSet {
+                selection,
+                text,
+                reply,
+            })
+            .await?
+    }
+
+    // Deliberately on the compositor deadline rather than the shorter settle
+    // one: this waits on the client to write down a pipe, which is the client
+    // being slow rather than the client failing to draw, and the two do not
+    // deserve the same patience.
+    async fn clipboard_get(
+        self,
+        _: Context,
+        selection: Selection,
+    ) -> Result<Option<String>, Failure> {
+        self.0
+            .commands
+            .ask(COMPOSITOR_DEADLINE, |reply| Command::ClipboardGet {
+                selection,
+                reply,
+            })
+            .await?
     }
 
     async fn tree(self, _: Context, _target: Target) -> Result<Node, Failure> {

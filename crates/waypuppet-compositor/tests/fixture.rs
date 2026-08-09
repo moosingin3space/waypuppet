@@ -32,7 +32,7 @@
 #![allow(dead_code, reason = "each test binary uses a different part of this")]
 
 use std::{
-    io::Write as _,
+    io::{Read as _, Write as _},
     os::{
         fd::{AsFd as _, AsRawFd as _},
         unix::{fs::FileExt as _, net::UnixStream},
@@ -62,6 +62,10 @@ use wayland_client::{
         wl_buffer::WlBuffer,
         wl_callback::{self, WlCallback},
         wl_compositor::WlCompositor,
+        wl_data_device::{self, WlDataDevice},
+        wl_data_device_manager::WlDataDeviceManager,
+        wl_data_offer::{self, WlDataOffer},
+        wl_data_source::{self, WlDataSource},
         wl_keyboard::{self, KeyState, KeymapFormat, WlKeyboard},
         wl_pointer::{self, ButtonState, WlPointer},
         wl_registry::WlRegistry,
@@ -72,9 +76,17 @@ use wayland_client::{
     },
 };
 use wayland_protocols::{
-    wp::linux_dmabuf::zv1::client::{
-        zwp_linux_buffer_params_v1::{self, ZwpLinuxBufferParamsV1},
-        zwp_linux_dmabuf_v1::{self, ZwpLinuxDmabufV1},
+    wp::{
+        linux_dmabuf::zv1::client::{
+            zwp_linux_buffer_params_v1::{self, ZwpLinuxBufferParamsV1},
+            zwp_linux_dmabuf_v1::{self, ZwpLinuxDmabufV1},
+        },
+        primary_selection::zv1::client::{
+            zwp_primary_selection_device_manager_v1::ZwpPrimarySelectionDeviceManagerV1,
+            zwp_primary_selection_device_v1::{self, ZwpPrimarySelectionDeviceV1},
+            zwp_primary_selection_offer_v1::{self, ZwpPrimarySelectionOfferV1},
+            zwp_primary_selection_source_v1::{self, ZwpPrimarySelectionSourceV1},
+        },
     },
     xdg::shell::client::{
         xdg_surface::{self, XdgSurface},
@@ -83,7 +95,13 @@ use wayland_protocols::{
     },
 };
 use waypuppet_compositor::{Command, Compositor, Config, Frame, Rendering, State};
-use waypuppet_proto::{Failure, Size};
+use waypuppet_proto::{Failure, Selection, Size};
+
+/// The MIME type the fixture exchanges selections in.
+///
+/// The same one waypuppet offers and asks for. A test that disagreed with the
+/// compositor here would be testing mime negotiation rather than the clipboard.
+pub const TEXT_MIME: &str = "text/plain;charset=utf-8";
 
 /// How long any single harness wait may take before it fails with a diagnosis.
 pub const WAIT_LIMIT: Duration = Duration::from_secs(10);
@@ -591,6 +609,113 @@ impl Harness {
         }
     }
 
+    /// Let the client answer whatever the compositor has asked of it.
+    ///
+    /// A selection the *client* owns is handed over during the client's own
+    /// dispatch, and between commands the client thread is blocked waiting for
+    /// the next one. So a compositor-side read has to be interleaved with this
+    /// rather than simply awaited — which is the harness's usual bargain in the
+    /// other direction: nothing blocks unless somebody is driving the far side.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the client does not answer within [`WAIT_LIMIT`].
+    pub fn pump(&mut self, client: &mut ClientThread) {
+        client.send(ClientCommand::Pump);
+        self.await_reply(client, "the client to answer the compositor");
+    }
+
+    /// Have the client take ownership of a selection.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the client does not answer within [`WAIT_LIMIT`].
+    pub fn own_selection(&mut self, client: &mut ClientThread, selection: Selection, text: &str) {
+        self.own_selection_as(client, selection, TEXT_MIME, text);
+    }
+
+    /// The same, under a mime type of the caller's choosing.
+    ///
+    /// Exists for the case where the client offers something waypuppet cannot
+    /// read, which has to be told apart from an empty selection.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the client does not answer within [`WAIT_LIMIT`].
+    pub fn own_selection_as(
+        &mut self,
+        client: &mut ClientThread,
+        selection: Selection,
+        mime: &str,
+        text: &str,
+    ) {
+        client.send(ClientCommand::OwnSelection(
+            selection,
+            mime.to_owned(),
+            text.to_owned(),
+        ));
+        self.await_reply(client, "the client to take the selection");
+    }
+
+    /// Ask the client what it can see in a selection.
+    ///
+    /// This is the client's view over the protocol, not waypuppet's own idea of
+    /// what it offered — which is the point. A selection nobody was actually
+    /// told about would pass the second check and fail this one.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the client does not answer within [`WAIT_LIMIT`].
+    pub fn client_sees(
+        &mut self,
+        client: &mut ClientThread,
+        selection: Selection,
+    ) -> Option<String> {
+        client.send(ClientCommand::ReadSelection(selection));
+        match self.await_reply(client, "the client to read the selection") {
+            Reply::Selection(text) => text,
+            other => panic!("expected a selection, got {other:?}"),
+        }
+    }
+
+    /// Read a selection through the compositor, pumping the client meanwhile.
+    ///
+    /// # Panics
+    ///
+    /// Panics if nothing answers within [`WAIT_LIMIT`], or if the compositor
+    /// has gone away.
+    pub fn read_selection(
+        &mut self,
+        client: &mut ClientThread,
+        selection: Selection,
+    ) -> Result<Option<String>, Failure> {
+        // Cloned rather than borrowed from `self`: the loop below hands the
+        // whole harness to `pump`, which a live borrow of `self.watch` would
+        // rule out. `Watch` is a handle, so a clone is the same watch.
+        let watch = self.watch.clone();
+        let _guard = watch.begin("a selection to be read");
+        let (reply, mut receiver) = oneshot::channel();
+        self.compositor
+            .commands()
+            .send(Command::ClipboardGet { selection, reply })
+            .expect("the compositor is listening");
+
+        let deadline = Instant::now() + WAIT_LIMIT;
+        while Instant::now() < deadline {
+            match receiver.try_recv() {
+                Ok(answer) => return answer,
+                Err(oneshot::error::TryRecvError::Closed) => return Err(Failure::ShuttingDown),
+                Err(oneshot::error::TryRecvError::Empty) => {
+                    // Both sides get a turn: the compositor to send the request
+                    // and drain the pipe, the client to notice and write.
+                    self.compositor.tick(TICK).expect("the compositor ticks");
+                    self.pump(client);
+                }
+            }
+        }
+        panic!("gave up after {WAIT_LIMIT:?} waiting for a selection to be read");
+    }
+
     /// Hand back the input the client has received since the last call.
     ///
     /// # Panics
@@ -736,6 +861,12 @@ enum ClientCommand {
     Drain,
     /// Request a frame callback and block until the compositor answers it.
     AwaitFrame,
+    /// Dispatch whatever the compositor has sent, and answer it.
+    Pump,
+    /// Take ownership of a selection, offering this text under this mime type.
+    OwnSelection(Selection, String, String),
+    /// Read whatever the compositor is offering as a selection.
+    ReadSelection(Selection),
     /// Disconnect and finish.
     Stop,
 }
@@ -751,6 +882,8 @@ enum Reply {
     Input(Vec<Input>),
     /// A dmabuf paint was attempted, and either worked or could not be set up.
     Painted(Result<(), String>),
+    /// What the client could read from a selection, if anything.
+    Selection(Option<String>),
     /// The last command finished.
     Done,
 }
@@ -788,6 +921,17 @@ fn client_thread(
                 client.await_frame();
                 Reply::Done
             }
+            ClientCommand::Pump => {
+                client.pump();
+                Reply::Done
+            }
+            ClientCommand::OwnSelection(selection, mime, text) => {
+                client.own_selection(selection, &mime, &text);
+                Reply::Done
+            }
+            ClientCommand::ReadSelection(selection) => {
+                Reply::Selection(client.read_selection(selection))
+            }
             ClientCommand::Stop => {
                 let _ = replies.send(Reply::Done);
                 return;
@@ -815,6 +959,14 @@ struct Client {
     /// Held so the compositor keeps sending to them.
     _keyboard: WlKeyboard,
     _pointer: WlPointer,
+    /// The selection managers, and this client's devices on them.
+    data_manager: WlDataDeviceManager,
+    primary_manager: ZwpPrimarySelectionDeviceManagerV1,
+    data_device: WlDataDevice,
+    primary_device: ZwpPrimarySelectionDeviceV1,
+    /// Held so a selection this client owns survives the request that set it.
+    /// Dropping a source withdraws the selection.
+    sources: Vec<Source>,
     /// The dmabuf global, bound at version 3 so the format and modifier events
     /// arrive — which is also how this fixture learns what the compositor will
     /// accept, rather than guessing. `None` if it was never advertised.
@@ -871,6 +1023,14 @@ impl Held {
     }
 }
 
+/// A selection this client owns, kept alive for as long as it owns it.
+enum Source {
+    /// A `wl_data_source` backing the clipboard.
+    Clipboard(WlDataSource),
+    /// A `zwp_primary_selection_source_v1` backing the primary selection.
+    Primary(ZwpPrimarySelectionSourceV1),
+}
+
 /// What the client has learned from the compositor.
 #[derive(Default)]
 struct Events {
@@ -888,6 +1048,17 @@ struct Events {
     dmabuf_formats: Vec<(u32, Modifier)>,
     /// How many `wl_surface.frame` callbacks have fired.
     frames: u32,
+    /// The selections the compositor is currently offering, if any.
+    clipboard_offer: Option<WlDataOffer>,
+    primary_offer: Option<ZwpPrimarySelectionOfferV1>,
+    /// What this client hands over when asked for a selection it owns.
+    offered: String,
+    /// The most recent serial from an input event.
+    ///
+    /// `set_selection` has to cite one: a client may only take the clipboard in
+    /// response to something the user did, and inventing a serial is how a
+    /// compositor learns to distrust you.
+    serial: u32,
 }
 
 impl Events {
@@ -991,10 +1162,22 @@ impl Client {
             }
         });
 
+        // Version 3 for `wl_data_device_manager`, which is what a modern
+        // toolkit binds; the selection requests used here exist at every
+        // version, so this is about being ordinary rather than about need.
+        let data_manager: WlDataDeviceManager = globals
+            .bind(&handle, 3..=3, ())
+            .expect("wl_data_device_manager");
+        let primary_manager: ZwpPrimarySelectionDeviceManagerV1 = globals
+            .bind(&handle, 1..=1, ())
+            .expect("zwp_primary_selection_device_manager_v1");
+
         // waypuppet's seat always has both, so there is no need to wait for the
         // capabilities event before asking.
         let keyboard = seat.get_keyboard(&handle, ());
         let pointer = seat.get_pointer(&handle, ());
+        let data_device = data_manager.get_data_device(&seat, &handle, ());
+        let primary_device = primary_manager.get_device(&seat, &handle, ());
 
         let surface = compositor.create_surface(&handle, ());
         let xdg_surface = wm_base.get_xdg_surface(&surface, &handle, ());
@@ -1014,6 +1197,11 @@ impl Client {
             toplevel,
             _keyboard: keyboard,
             _pointer: pointer,
+            data_manager,
+            primary_manager,
+            data_device,
+            primary_device,
+            sources: Vec::new(),
             dmabuf,
             buffer: None,
             imported: None,
@@ -1050,6 +1238,86 @@ impl Client {
             .expect("the connection is healthy");
     }
 
+    /// Answer whatever the compositor has sent since the last turn.
+    ///
+    /// A roundtrip rather than a bare dispatch, because the interesting case is
+    /// a `send` event asking this client to write a selection it owns — and
+    /// that write happens inside the dispatch, so it has to actually run.
+    fn pump(&mut self) {
+        self.connection
+            .roundtrip()
+            .expect("the connection is healthy");
+        self.queue
+            .dispatch_pending(&mut self.events)
+            .expect("the connection is healthy");
+    }
+
+    /// Take ownership of a selection, offering `text` under `mime`.
+    fn own_selection(&mut self, selection: Selection, mime: &str, text: &str) {
+        self.events.offered.clear();
+        self.events.offered.push_str(text);
+        let serial = self.events.serial;
+
+        let source = match selection {
+            Selection::Clipboard => {
+                let source = self.data_manager.create_data_source(&self.handle, ());
+                source.offer(mime.to_owned());
+                self.data_device.set_selection(Some(&source), serial);
+                Source::Clipboard(source)
+            }
+            Selection::Primary => {
+                let source = self.primary_manager.create_source(&self.handle, ());
+                source.offer(mime.to_owned());
+                self.primary_device.set_selection(Some(&source), serial);
+                Source::Primary(source)
+            }
+        };
+        self.sources.push(source);
+
+        self.connection
+            .roundtrip()
+            .expect("the compositor accepted the selection");
+    }
+
+    /// Read whatever the compositor is offering as a selection.
+    ///
+    /// Blocks on the compositor filling a pipe, which is safe for the usual
+    /// harness reason: whoever is waiting on this client is ticking the
+    /// compositor on its behalf.
+    fn read_selection(&mut self, selection: Selection) -> Option<String> {
+        // The offer arrives as an event, so make sure everything sent so far
+        // has been read before concluding there is nothing on offer.
+        self.pump();
+
+        let (reader, writer) = std::io::pipe().expect("a pipe");
+        match selection {
+            Selection::Clipboard => {
+                self.events
+                    .clipboard_offer
+                    .as_ref()?
+                    .receive(TEXT_MIME.to_owned(), writer.as_fd());
+            }
+            Selection::Primary => {
+                self.events
+                    .primary_offer
+                    .as_ref()?
+                    .receive(TEXT_MIME.to_owned(), writer.as_fd());
+            }
+        }
+        self.connection.flush().expect("the request goes out");
+
+        // Ours is the last copy of the write end besides the compositor's, and
+        // the read below ends at EOF — which cannot arrive while this is open.
+        drop(writer);
+
+        let mut text = String::new();
+        let mut reader = reader;
+        reader
+            .read_to_string(&mut text)
+            .expect("the compositor writes the selection");
+        Some(text)
+    }
+
     /// Dispatch whatever has arrived and hand back the input in it.
     fn drain(&mut self) -> Vec<Input> {
         // A roundtrip rather than a bare dispatch: it guarantees everything the
@@ -1064,8 +1332,13 @@ impl Client {
         std::mem::take(&mut self.events.input)
     }
 
-    /// Dispatch until the compositor has configured us, and return the size.
+    /// Dispatch until the compositor configures us, and return the size.
+    ///
+    /// Waits for the *next* configure, not the last one seen: a resize is a
+    /// second configure, and a version that returned the cached one would hand
+    /// back the old size and make a resize test pass without resizing.
     fn wait_for_configure(&mut self) -> (i32, i32) {
+        self.events.configured = None;
         while self.events.configured.is_none() {
             self.queue
                 .blocking_dispatch(&mut self.events)
@@ -1573,11 +1846,16 @@ impl Dispatch<WlKeyboard, ()> for Events {
                     xkb.update_mask(mods_depressed, mods_latched, mods_locked, 0, 0, group);
                 }
             }
+            // Any serial from a real input event will do to cite when taking a
+            // selection; the enter that comes with focus is the earliest one.
+            wl_keyboard::Event::Enter { serial, .. } => state.serial = serial,
             wl_keyboard::Event::Key {
                 key,
                 state: key_state,
+                serial,
                 ..
             } => {
+                state.serial = serial;
                 let pressed =
                     key_state.into_result().expect("a known key state") == KeyState::Pressed;
                 let name = state.name(key);
@@ -1651,6 +1929,116 @@ impl Dispatch<WlPointer, ()> for Events {
     }
 }
 
+// ------------------------------------------------------------- selections --
+
+impl Dispatch<WlDataDevice, ()> for Events {
+    fn event(
+        state: &mut Self,
+        _device: &WlDataDevice,
+        event: wl_data_device::Event,
+        _data: &(),
+        _connection: &Connection,
+        _handle: &QueueHandle<Self>,
+    ) {
+        // `DataOffer` introduces the object; `Selection` says which one is the
+        // clipboard, and a `None` means the selection was withdrawn. Only the
+        // second is worth recording — an offer nobody named is a drag, and
+        // there is no drag in a session with one client.
+        if let wl_data_device::Event::Selection { id } = event {
+            state.clipboard_offer = id;
+        }
+    }
+
+    // The offer arrives as a brand new object, so the queue needs to be told
+    // what to attach to it.
+    wayland_client::event_created_child!(Events, WlDataDevice, [
+        wl_data_device::EVT_DATA_OFFER_OPCODE => (WlDataOffer, ()),
+    ]);
+}
+
+impl Dispatch<WlDataOffer, ()> for Events {
+    fn event(
+        _state: &mut Self,
+        _offer: &WlDataOffer,
+        _event: wl_data_offer::Event,
+        _data: &(),
+        _connection: &Connection,
+        _handle: &QueueHandle<Self>,
+    ) {
+        // The `offer` events name the available mime types. This fixture asks
+        // for one type and finds out whether it was there by whether the read
+        // produces anything, so there is nothing to record.
+    }
+}
+
+impl Dispatch<WlDataSource, ()> for Events {
+    fn event(
+        state: &mut Self,
+        _source: &WlDataSource,
+        event: wl_data_source::Event,
+        _data: &(),
+        _connection: &Connection,
+        _handle: &QueueHandle<Self>,
+    ) {
+        if let wl_data_source::Event::Send { mime_type: _, fd } = event {
+            // Writing then dropping is the whole protocol: the close is the
+            // EOF the reader is waiting for. A client that forgot the drop
+            // would hang the compositor's read, which is exactly why that read
+            // is on the event loop rather than inline.
+            let mut file = std::fs::File::from(fd);
+            let _ = file.write_all(state.offered.as_bytes());
+        }
+    }
+}
+
+impl Dispatch<ZwpPrimarySelectionDeviceV1, ()> for Events {
+    fn event(
+        state: &mut Self,
+        _device: &ZwpPrimarySelectionDeviceV1,
+        event: zwp_primary_selection_device_v1::Event,
+        _data: &(),
+        _connection: &Connection,
+        _handle: &QueueHandle<Self>,
+    ) {
+        if let zwp_primary_selection_device_v1::Event::Selection { id } = event {
+            state.primary_offer = id;
+        }
+    }
+
+    wayland_client::event_created_child!(Events, ZwpPrimarySelectionDeviceV1, [
+        zwp_primary_selection_device_v1::EVT_DATA_OFFER_OPCODE
+            => (ZwpPrimarySelectionOfferV1, ()),
+    ]);
+}
+
+impl Dispatch<ZwpPrimarySelectionOfferV1, ()> for Events {
+    fn event(
+        _state: &mut Self,
+        _offer: &ZwpPrimarySelectionOfferV1,
+        _event: zwp_primary_selection_offer_v1::Event,
+        _data: &(),
+        _connection: &Connection,
+        _handle: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<ZwpPrimarySelectionSourceV1, ()> for Events {
+    fn event(
+        state: &mut Self,
+        _source: &ZwpPrimarySelectionSourceV1,
+        event: zwp_primary_selection_source_v1::Event,
+        _data: &(),
+        _connection: &Connection,
+        _handle: &QueueHandle<Self>,
+    ) {
+        if let zwp_primary_selection_source_v1::Event::Send { mime_type: _, fd } = event {
+            let mut file = std::fs::File::from(fd);
+            let _ = file.write_all(state.offered.as_bytes());
+        }
+    }
+}
+
 macro_rules! ignore_events {
     ($($proxy:ty),* $(,)?) => {
         $(
@@ -1669,4 +2057,13 @@ macro_rules! ignore_events {
     };
 }
 
-ignore_events!(WlCompositor, WlSurface, WlShm, WlShmPool, WlBuffer);
+ignore_events!(
+    WlCompositor,
+    WlSurface,
+    WlShm,
+    WlShmPool,
+    WlBuffer,
+    // Neither manager sends anything; they exist to make devices and sources.
+    WlDataDeviceManager,
+    ZwpPrimarySelectionDeviceManagerV1,
+);

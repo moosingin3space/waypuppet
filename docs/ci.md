@@ -4,10 +4,11 @@ How to run your GUI application's tests on a machine with no screen, no desktop 
 — usually — no GPU.
 
 > **Status:** real, apart from `tree`. `doctor`, `run`, `ps`, `shot`, `logs`, `kill`,
-> `sessions`, `wait` and every input verb — `key`, `type`, `click`, `move`, `scroll`,
-> `resize` — work today, and are exercised against a real GTK application on every push by
-> [`ci/toolkit-smoke.sh`](../ci/toolkit-smoke.sh), which runs the example below almost
-> verbatim. The accessibility tree is [plan 07](../plans/07-accessibility-tree.md).
+> `sessions`, `wait`, `clipboard` and every input verb — `key`, `type`, `click`, `move`,
+> `scroll`, `resize` — work today, and are exercised against a real GTK application on
+> every push by [`ci/toolkit-smoke.sh`](../ci/toolkit-smoke.sh), which runs the example
+> below almost verbatim. The accessibility tree is
+> [plan 07](../plans/07-accessibility-tree.md).
 
 ## What CI has to provide
 
@@ -60,6 +61,30 @@ The condition is evaluated when the request arrives, so `wait` for something tha
 already happened returns immediately rather than blocking until it next changes. That is
 what makes `run --detach` followed by `wait --windows 1` safe: it does not matter which of
 the two wins the race.
+
+### Testing a paste
+
+`waypuppet type` and a paste are different code paths in most applications — a terminal
+uses bracketed paste precisely so that pasted text is not treated as keystrokes — so if
+your application handles both, test both:
+
+```bash
+waypuppet clipboard set 'text to paste'
+waypuppet key ctrl+v
+waypuppet shot -o artifacts/after-paste.png
+```
+
+It reads the other way too, which is how to assert that a copy did what it should:
+
+```bash
+waypuppet key ctrl+a
+waypuppet key ctrl+c
+test "$(waypuppet clipboard get)" = 'what should have been copied'
+```
+
+Both take `--primary` for the X11-style selection. `clipboard get` prints nothing and exits
+0 when nothing owns the selection — an empty clipboard is not an error — and
+`clipboard set --stdin` reads the text from a pipe when it is long or awkward to quote.
 
 ## GitHub Actions
 

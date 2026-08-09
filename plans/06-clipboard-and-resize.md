@@ -1,6 +1,6 @@
 # 06 — Clipboard and resize
 
-**Status:** not started
+**Status:** done
 **Depends on:** [05](05-wait.md)
 
 ## Goal
@@ -66,3 +66,59 @@ before something needs it.
 - Terminals distinguish paste from typing — bracketed paste exists precisely so a paste is
   not treated as keystrokes. Setting the selection and letting the app paste is testing
   something genuinely different from `waypuppet type`, and both are worth having.
+
+## What it turned out to be
+
+`waypuppet clipboard get` and `clipboard set`, each taking `--primary`, over
+`wl_data_device` and `zwp_primary_selection_v1`. Verified against GTK 3 in both directions:
+text set from the command line pastes into `gtk3-widget-factory` with `ctrl+v` and changes
+the capture, and text selected in GTK with `ctrl+a`/`ctrl+c` reads back out — including
+into the primary selection, which GTK fills on select-all without being asked.
+
+**The transfers are event sources, which is the whole of the difficulty.** The note above
+called the fd-based read "the most likely place to accidentally block", and it was right
+in both directions. A read is a pipe the *client* fills whenever it likes; a write is a
+pipe the client drains whenever it likes. Neither can be done inline on the compositor
+thread, so both are `calloop` sources with the payload carried across wake-ups, and both
+fds are made non-blocking first. That is what `rustix` was added for — `std::io::pipe`
+exists but offers no way to set `O_NONBLOCK`, and there is no acceptable amount of blocking
+here.
+
+`a_selection_larger_than_a_pipe_still_arrives_whole` is the test that matters: 300KiB,
+comfortably past the 64KiB a pipe buffers, so the transfer cannot complete in one write.
+A version that read once and stopped would return a tidy 64KiB prefix and look like it
+worked.
+
+**Reads are tracked, writes are not.** A read has a parked reply, so an abandoned one has
+to be reachable to be swept — `prune_parked` closes its pipe and drops its loop
+registration alongside the other two registries. A write owns everything it needs and ends
+by itself: when the client stops reading, the write fails with `EPIPE` and unregisters. The
+asymmetry is deliberate and is written down at the type.
+
+**`focus_changed` is load-bearing**, in the same way `title_changed` was for
+[05](05-wait.md). A selection is offered to the focused client and to nobody else, so
+without that hook a `clipboard set` issued before the window appeared would be owned by the
+seat and visible to no one. smithay re-offers the current selection when focus changes,
+which is exactly when a freshly mapped window needs telling.
+
+**Three answers, not two.** `clipboard get` returns `Option<String>`: `None` means nothing
+owns the selection, which is an ordinary state of affairs. A selection that exists but is
+not text is `Failure::Clipboard` instead, because "there is nothing" and "there is something
+you cannot read" call for different reactions. Collapsing them into an empty string would
+have been the easy mistake.
+
+**The resize half needed a test, not code.** `resize` landed with
+[04](04-input.md) — it is a mutating verb like any other. What was missing was the case in
+the scope above: a window *smaller* than the output. `tests/resize.rs` asserts the client's
+pixels are inside its own bounds and background is outside, which is the only test in the
+suite where the compositing path draws anything of its own. Every other capture is
+wall-to-wall client buffer, so a renderer that ignored the clear colour, placed the window
+wrongly, or scaled it to fit would produce an identical image; here those three give three
+different wrong answers. Fixing the fixture to wait for the *next* configure rather than
+returning the cached one was needed to make it mean anything.
+
+**Not done, and deliberately:** the acceptance criteria name `example-app-app`, and this was
+verified against GTK 3 instead. GTK exercises the same protocols and is already in the CI
+image; building a sibling project inside waypuppet's container to prove waypuppet is the
+wrong dependency to take. The `example-app` check is worth doing once
+[08](08-sandbox-autonomy.md) makes hosting an arbitrary application routine.

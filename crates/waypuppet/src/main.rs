@@ -18,7 +18,9 @@ use std::{path::Path, path::PathBuf, process::ExitCode, time::Duration};
 
 use clap::{Parser, Subcommand};
 use waypuppet_compositor::{Rendering, session};
-use waypuppet_proto::{Button, ClientState, Cursor, Point, Settled, Size, Target, WindowId};
+use waypuppet_proto::{
+    Button, ClientState, Cursor, Point, Selection, Settled, Size, Target, WindowId,
+};
 
 /// What `wait` exits with when its condition did not hold in time.
 ///
@@ -208,12 +210,52 @@ enum Command {
         timeout: u64,
     },
 
+    /// Read or write a selection.
+    ///
+    /// Setting one and letting the application paste is a genuinely different
+    /// test from `type`: a terminal distinguishes a paste from keystrokes —
+    /// bracketed paste exists for exactly that reason — so both are worth
+    /// having.
+    Clipboard {
+        #[command(subcommand)]
+        action: ClipboardAction,
+    },
+
     /// Print the accessibility tree the application publishes.
     ///
     /// A semantic view of the window: roles, names and bounds, rather than
     /// pixels. Toolkits built on AccessKit — freya among them — publish one
     /// without being asked.
     Tree,
+}
+
+/// What to do with a selection.
+#[derive(Debug, Subcommand)]
+enum ClipboardAction {
+    /// Print the selection's contents.
+    ///
+    /// Prints nothing and exits 0 when nothing owns the selection, which is an
+    /// ordinary state of affairs rather than an error.
+    Get {
+        /// Read the primary selection rather than the clipboard.
+        ///
+        /// The X11-style one, filled by selecting text and pasted with the
+        /// middle button.
+        #[arg(long)]
+        primary: bool,
+    },
+    /// Offer text to the application as a selection.
+    Set {
+        /// Read the text from stdin rather than the command line.
+        #[arg(long, conflicts_with = "text")]
+        stdin: bool,
+        /// Set the primary selection rather than the clipboard.
+        #[arg(long)]
+        primary: bool,
+        /// The text to offer.
+        #[arg(required_unless_present = "stdin")]
+        text: Option<String>,
+    },
 }
 
 /// What `wait` blocks on.
@@ -353,6 +395,7 @@ async fn dispatch(cli: Cli) -> ExitCode {
         Command::Scroll { dx, dy } => scroll(&socket, dx, dy).await,
         Command::Resize { size, window } => resize(&socket, &size, window).await,
         Command::Wait { condition, timeout } => wait(&socket, condition, timeout, cli.json).await,
+        Command::Clipboard { action } => clipboard(&socket, action).await,
         // The last of them. `--help` still shows the whole designed surface
         // rather than only the finished part, because the shape is the thing
         // being committed to.
@@ -700,6 +743,69 @@ async fn wait(
             ExitCode::from(TIMED_OUT)
         }
     })
+}
+
+/// Read or write a selection.
+async fn clipboard(socket: &Path, action: ClipboardAction) -> Result<ExitCode, String> {
+    let session = client::connect(socket).await?;
+
+    match action {
+        ClipboardAction::Get { primary } => {
+            let text = session
+                .clipboard_get(client::deadline(client::DEADLINE), selection(primary))
+                .await
+                .map_err(|error| error.to_string())?
+                .map_err(|failure| failure.to_string())?;
+
+            // Printed without a trailing newline: a selection is the bytes it
+            // is, and `$(waypuppet clipboard get)` should give back exactly
+            // what was copied. An empty selection prints nothing at all.
+            if let Some(text) = text {
+                print!("{text}");
+                let _ = std::io::Write::flush(&mut std::io::stdout());
+            }
+        }
+        // `stdin` is not read here: clap has already enforced that exactly one
+        // of it and `text` is present, so the absence of `text` *is* `--stdin`.
+        ClipboardAction::Set {
+            stdin: _,
+            primary,
+            text,
+        } => {
+            let text = text.map_or_else(read_stdin, Ok)?;
+
+            session
+                .clipboard_set(client::deadline(client::DEADLINE), selection(primary), text)
+                .await
+                .map_err(|error| error.to_string())?
+                .map_err(|failure| failure.to_string())?;
+        }
+    }
+
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Everything on stdin, for `clipboard set --stdin`.
+///
+/// Read whole rather than by lines: a selection is the bytes it is, and a
+/// trailing newline that a caller piped in is part of what they meant to copy.
+fn read_stdin() -> Result<String, String> {
+    use std::io::Read as _;
+
+    let mut buffer = String::new();
+    std::io::stdin()
+        .read_to_string(&mut buffer)
+        .map_err(|error| error.to_string())?;
+    Ok(buffer)
+}
+
+/// Which selection a `--primary` flag names.
+fn selection(primary: bool) -> Selection {
+    if primary {
+        Selection::Primary
+    } else {
+        Selection::Clipboard
+    }
 }
 
 /// Stop the session.

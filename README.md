@@ -108,6 +108,7 @@ drive a session too, but the command line is the product.
 | `waypuppet click` / `move` / `scroll` | pointer input |
 | `waypuppet resize` | reconfigure a window, as a compositor would |
 | `waypuppet wait` | block on a protocol-level condition |
+| `waypuppet clipboard get` / `set` | read or write either selection |
 | `waypuppet tree` | the accessibility tree |
 | `waypuppet logs` | what the client printed |
 | `waypuppet kill` | stop it |
@@ -135,6 +136,12 @@ by `wait --windows 1` is safe whichever of the two wins the race. `--windows` an
 are the dependable ones; the other two come with caveats stated in `--help`, because frames
 arrive whether or not you caused them and an application with a spinner is never idle.
 
+The clipboard works both ways and covers both selections — the ordinary one and the
+X11-style primary selection a terminal user expects. `clipboard set` offers text the
+application can paste, which is a genuinely different test from `type`, since a terminal
+distinguishes a paste from keystrokes. `clipboard get` reads back what the application
+itself copied.
+
 Clients may draw through `wl_shm` or `zwp_linux_dmabuf_v1`, so anything Skia-backed —
 which renders through EGL — has somewhere to put its buffers.
 
@@ -144,7 +151,9 @@ clicked into, typed at, and the text appears in the next capture with no sleep a
 Every push is checked in a container with no GPU, which is the environment most users will
 run waypuppet in, and one job drives that GTK application end to end.
 
-**Not yet.** The clipboard and the accessibility tree.
+**Not yet.** The accessibility tree, which is [plan 07](plans/07-accessibility-tree.md).
+The mechanism has been proven — an AccessKit application publishes its tree to waypuppet
+over a private bus — but it is not wired up.
 
 [CLAUDE.md] has the architecture, [plans/](plans/) has one file per phase with its status
 and what it taught us, and [docs/](docs/) covers using waypuppet in CI.

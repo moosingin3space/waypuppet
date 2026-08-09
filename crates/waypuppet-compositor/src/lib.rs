@@ -184,14 +184,17 @@ impl Compositor {
         let mut display =
             Display::<State>::new().map_err(|error| Error::Compositor(error.to_string()))?;
         let display_handle = display.handle();
+        let handle = event_loop.handle();
 
-        let state = State::new(display_handle, config)?;
+        // The loop handle goes in because a clipboard transfer is a pipe the
+        // client fills at its own pace, and the only way to wait for that
+        // without stopping the compositor is to let the compositor do the
+        // waiting — as one more event source.
+        let state = State::new(display_handle, handle.clone(), config)?;
 
         let socket = ListeningSocketSource::new_auto()
             .map_err(|error| Error::Compositor(error.to_string()))?;
         let socket_name = socket.socket_name().to_string_lossy().into_owned();
-
-        let handle = event_loop.handle();
         handle
             .insert_source(socket, |stream, (), state: &mut State| {
                 let data = std::sync::Arc::new(state.new_client_state());
@@ -391,6 +394,19 @@ fn handle_command(state: &mut State, command: Command) {
         // the same way, and the registry answers it from wherever that fact can
         // change.
         Command::Wait { condition, reply } => state.park_wait(condition, reply),
+
+        // Owning a selection is bookkeeping and answers at once. Reading one
+        // usually cannot: the client writes down a pipe whenever it likes, so
+        // the reply is parked on a transfer the loop drives.
+        Command::ClipboardSet {
+            selection,
+            text,
+            reply,
+        } => {
+            state.set_selection(selection, text);
+            let _ = reply.send(Ok(()));
+        }
+        Command::ClipboardGet { selection, reply } => state.read_selection(selection, reply),
     }
 }
 

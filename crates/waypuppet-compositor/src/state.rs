@@ -6,6 +6,9 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    fs::File,
+    io::{ErrorKind, PipeReader, Read as _, Write as _},
+    os::fd::{AsFd, OwnedFd},
     sync::{Arc, Mutex, PoisonError},
     time::{Duration, Instant},
 };
@@ -17,8 +20,8 @@ use smithay::{
         input::{Axis, AxisSource, ButtonState, KeyState},
         renderer::utils::on_commit_buffer_handler,
     },
-    delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_output, delegate_seat,
-    delegate_shm, delegate_xdg_shell,
+    delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_output,
+    delegate_primary_selection, delegate_seat, delegate_shm, delegate_xdg_shell,
     desktop::{Space, Window},
     input::{
         Seat, SeatHandler, SeatState,
@@ -26,10 +29,15 @@ use smithay::{
         pointer::{AxisFrame, ButtonEvent, MotionEvent},
     },
     output::{Mode as OutputMode, Output, PhysicalProperties, Scale, Subpixel},
-    reexports::wayland_server::{
-        Client, DisplayHandle,
-        backend::{ClientData, ClientId, DisconnectReason},
-        protocol::{wl_buffer::WlBuffer, wl_seat::WlSeat, wl_surface::WlSurface},
+    reexports::{
+        calloop::{
+            Interest, LoopHandle, Mode as LoopMode, PostAction, RegistrationToken, generic::Generic,
+        },
+        wayland_server::{
+            Client, DisplayHandle, Resource,
+            backend::{ClientData, ClientId, DisconnectReason},
+            protocol::{wl_buffer::WlBuffer, wl_seat::WlSeat, wl_surface::WlSurface},
+        },
     },
     utils::{
         Clock, Logical, Monotonic, Point as SmithayPoint, SERIAL_COUNTER, Serial,
@@ -43,9 +51,17 @@ use smithay::{
         dmabuf::{DmabufFeedbackBuilder, DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier},
         output::{OutputHandler, OutputManagerState},
         selection::{
-            SelectionHandler,
+            SelectionHandler, SelectionTarget,
             data_device::{
-                ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
+                ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, SelectionRequestError,
+                ServerDndGrabHandler, current_data_device_selection_userdata,
+                request_data_device_client_selection, set_data_device_focus,
+                set_data_device_selection,
+            },
+            primary_selection::{
+                PrimarySelectionHandler, PrimarySelectionState,
+                SelectionRequestError as PrimaryRequestError, current_primary_selection_userdata,
+                request_primary_client_selection, set_primary_focus, set_primary_selection,
             },
         },
         shell::xdg::{
@@ -56,7 +72,7 @@ use smithay::{
     },
 };
 use tokio::sync::oneshot;
-use waypuppet_proto::{Button, Failure, Point, Rect, Target, WindowId};
+use waypuppet_proto::{Button, Failure, Point, Rect, Selection, Target, WindowId};
 
 use crate::{
     Config, Frame, Renderer,
@@ -271,6 +287,85 @@ enum Watch {
     Idle(Duration),
 }
 
+/// The MIME type waypuppet offers a selection as, and asks for one in.
+///
+/// One type, not a list. The consumer is a terminal, `text/plain;charset=utf-8`
+/// is what a terminal exchanges, and a selection is not the place to
+/// over-generalise before something needs it.
+const TEXT_MIME: &str = "text/plain;charset=utf-8";
+
+/// How much of a selection waypuppet will accept before giving up.
+///
+/// A transfer is a pipe the *client* fills, so its length is the client's
+/// choice, and "read until EOF" is an invitation to be handed a gigabyte. Four
+/// megabytes is far past any plausible clipboard and far short of a problem.
+const CLIPBOARD_LIMIT: usize = 4 * 1024 * 1024;
+
+/// How much to take off a transfer pipe per wake-up.
+const CHUNK: usize = 8 * 1024;
+
+/// Make `fd` non-blocking.
+///
+/// The whole reason the transfers below are event sources rather than plain
+/// reads and writes: on the compositor thread there is no such thing as a short
+/// block. A pipe whose reader is slow would otherwise stop the loop that the
+/// reader is very possibly waiting on.
+fn set_nonblocking(fd: impl AsFd) -> std::io::Result<()> {
+    let flags = rustix::fs::fcntl_getfl(&fd)?;
+    rustix::fs::fcntl_setfl(&fd, flags | rustix::fs::OFlags::NONBLOCK)?;
+    Ok(())
+}
+
+/// Selection reads still running on the event loop.
+///
+/// Only reads are tracked. A write owns everything it needs and finishes when
+/// the client reads or goes away; a read has a parked reply, and a reply that
+/// nobody is listening for any more has to be reachable so its pipe can be
+/// closed rather than held for the life of the session.
+#[derive(Default)]
+struct Transfers {
+    /// Reads in flight, by identifier.
+    reads: HashMap<u64, Reading>,
+    /// Source of the next identifier.
+    next: u64,
+}
+
+/// One selection read, part way through.
+struct Reading {
+    /// What has arrived so far.
+    buffer: Vec<u8>,
+    /// The call waiting on the whole of it.
+    reply: oneshot::Sender<Result<Option<String>, Failure>>,
+    /// The loop registration, so an abandoned read can be torn down.
+    token: RegistrationToken,
+}
+
+/// Why a client could not be asked for its selection.
+///
+/// `wl_data_device` and `zwp_primary_selection` report the same three refusals
+/// under two separate types. This is the one both flatten into, so the handling
+/// is written once.
+enum Asked {
+    /// Nobody owns the selection.
+    Nothing,
+    /// Somebody owns it, but not as anything waypuppet can read as text.
+    WrongType,
+    /// waypuppet owns it, so there is no client to ask.
+    Ours,
+}
+
+/// What one turn of a read produced.
+enum Chunk {
+    /// Bytes arrived.
+    Read(usize),
+    /// The writer closed: the transfer is complete.
+    Eof,
+    /// Nothing to take right now.
+    Again,
+    /// The transfer broke.
+    Failed(String),
+}
+
 /// Everything the compositor owns.
 #[expect(
     missing_debug_implementations,
@@ -295,6 +390,9 @@ pub struct State {
     /// will not create a seat at all without one, and a seat is where input
     /// arrives.
     pub data_device_state: DataDeviceState,
+    /// `zwp_primary_selection_device_manager_v1`, the X11-style
+    /// select-then-middle-click selection a terminal user expects.
+    pub primary_selection_state: PrimarySelectionState,
     /// Seat bookkeeping. Input injection goes through the seat below.
     pub seat_state: SeatState<Self>,
 
@@ -341,6 +439,10 @@ pub struct State {
     reported: (waypuppet_proto::Size, f64),
     /// Which Wayland clients are currently connected.
     clients: Clients,
+    /// Selection transfers still running on the event loop.
+    transfers: Transfers,
+    /// The loop, so a transfer can be driven by it rather than blocking it.
+    loop_handle: LoopHandle<'static, Self>,
     /// The output's logical size, which is also every window's size.
     output_size: SmithaySize<i32, Logical>,
     /// Source of the next [`WindowId`].
@@ -357,13 +459,18 @@ impl State {
     /// Failing here rather than at the first `key` call is deliberate: a
     /// session that cannot type is broken, and should say so while somebody is
     /// still looking at the startup output.
-    pub fn new(display_handle: DisplayHandle, config: &Config) -> Result<Self, crate::Error> {
+    pub fn new(
+        display_handle: DisplayHandle,
+        loop_handle: LoopHandle<'static, Self>,
+        config: &Config,
+    ) -> Result<Self, crate::Error> {
         let keymap = Keymap::new()?;
         let compositor_state = CompositorState::new::<Self>(&display_handle);
         let shm_state = ShmState::new::<Self>(&display_handle, Vec::new());
         let xdg_shell_state = XdgShellState::new::<Self>(&display_handle);
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&display_handle);
         let data_device_state = DataDeviceState::new::<Self>(&display_handle);
+        let primary_selection_state = PrimarySelectionState::new::<Self>(&display_handle);
         let mut seat_state = SeatState::new();
 
         let mut seat = seat_state.new_wl_seat(&display_handle, "waypuppet");
@@ -440,6 +547,7 @@ impl State {
             xdg_shell_state,
             output_manager_state,
             data_device_state,
+            primary_selection_state,
             seat_state,
             seat,
             output,
@@ -455,6 +563,8 @@ impl State {
             dmabuf,
             reported: (config.output, config.scale),
             clients: Clients::default(),
+            transfers: Transfers::default(),
+            loop_handle,
             output_size,
             next_window_id: 1,
         })
@@ -993,6 +1103,7 @@ impl State {
     pub fn prune_parked(&mut self) {
         self.settling.retain(|entry| !entry.reply.is_closed());
         self.waiting.retain(|entry| !entry.reply.is_closed());
+        self.prune_transfers();
     }
 
     /// How many replies are parked on a frame, for tests.
@@ -1155,6 +1266,292 @@ impl State {
         self.waiting.len()
     }
 
+    // ----------------------------------------------------------- clipboard --
+
+    /// Take ownership of a selection and offer `text` as its contents.
+    ///
+    /// Answered immediately, because owning a selection is only bookkeeping on
+    /// the seat: the client is told there is something to paste, and nothing
+    /// moves until it asks. When it does, [`SelectionHandler::send_selection`]
+    /// hands the bytes over.
+    pub fn set_selection(&mut self, selection: Selection, text: String) {
+        let mime_types = vec![TEXT_MIME.to_owned()];
+        match selection {
+            Selection::Clipboard => {
+                set_data_device_selection(&self.display_handle, &self.seat, mime_types, text);
+            }
+            Selection::Primary => {
+                set_primary_selection(&self.display_handle, &self.seat, mime_types, text);
+            }
+        }
+    }
+
+    /// Read a selection, parking `reply` on the transfer if there is one.
+    ///
+    /// Three outcomes, and telling them apart is the point. Nothing owns the
+    /// selection, so there is nothing to read; waypuppet owns it, so the answer
+    /// is already here; or a client owns it, and the answer arrives down a pipe
+    /// at a time of the client's choosing.
+    pub fn read_selection(
+        &mut self,
+        selection: Selection,
+        reply: oneshot::Sender<Result<Option<String>, Failure>>,
+    ) {
+        // Scoped so the `Ref` into the seat's user data is released before
+        // anything below borrows it again — this is a `RefCell`, and holding
+        // one across the request would panic rather than fail.
+        let ours = {
+            match selection {
+                Selection::Clipboard => {
+                    current_data_device_selection_userdata(&self.seat).map(|text| text.clone())
+                }
+                Selection::Primary => {
+                    current_primary_selection_userdata(&self.seat).map(|text| text.clone())
+                }
+            }
+        };
+        if let Some(text) = ours {
+            // waypuppet set this one. Asking the client for it would be asking
+            // the wrong party — and smithay rightly refuses.
+            let _ = reply.send(Ok(Some(text)));
+            return;
+        }
+
+        let (reader, writer) = match std::io::pipe() {
+            Ok(pipe) => pipe,
+            Err(error) => {
+                let _ = reply.send(Err(Failure::Clipboard(error.to_string())));
+                return;
+            }
+        };
+
+        // The write end goes to the client, and is left blocking: it is the
+        // client's fd, and a client that has not been written to expect EAGAIN
+        // would quietly lose the selection.
+        //
+        // The two protocols have identical refusals under separate types, so
+        // they are flattened here rather than duplicating the handling below.
+        let asked = match selection {
+            Selection::Clipboard => request_data_device_client_selection(
+                &self.seat,
+                TEXT_MIME.to_owned(),
+                OwnedFd::from(writer),
+            )
+            .map_err(|error| match error {
+                SelectionRequestError::NoSelection => Asked::Nothing,
+                SelectionRequestError::InvalidMimetype => Asked::WrongType,
+                SelectionRequestError::ServerSideSelection => Asked::Ours,
+            }),
+            Selection::Primary => request_primary_client_selection(
+                &self.seat,
+                TEXT_MIME.to_owned(),
+                OwnedFd::from(writer),
+            )
+            .map_err(|error| match error {
+                PrimaryRequestError::NoSelection => Asked::Nothing,
+                PrimaryRequestError::InvalidMimetype => Asked::WrongType,
+                PrimaryRequestError::ServerSideSelection => Asked::Ours,
+            }),
+        };
+
+        match asked {
+            Ok(()) => self.begin_read(reader, reply),
+            // Nothing owns it. An empty clipboard is an ordinary state of
+            // affairs, not a failure.
+            Err(Asked::Nothing) => {
+                let _ = reply.send(Ok(None));
+            }
+            Err(Asked::WrongType) => {
+                let _ = reply.send(Err(Failure::Clipboard(format!(
+                    "the selection is not offered as {TEXT_MIME}"
+                ))));
+            }
+            // Unreachable, since a selection of waypuppet's own was answered
+            // above — but said out loud rather than left to park for ever if
+            // that ever stops being true.
+            Err(Asked::Ours) => {
+                let _ = reply.send(Err(Failure::Clipboard(
+                    "the selection is the compositor's but could not be read back".to_owned(),
+                )));
+            }
+        }
+    }
+
+    /// Drive a selection read from the event loop.
+    fn begin_read(
+        &mut self,
+        reader: PipeReader,
+        reply: oneshot::Sender<Result<Option<String>, Failure>>,
+    ) {
+        if let Err(error) = set_nonblocking(&reader) {
+            let _ = reply.send(Err(Failure::Clipboard(error.to_string())));
+            return;
+        }
+
+        let id = self.transfers.next;
+        self.transfers.next += 1;
+
+        let source = Generic::new(reader, Interest::READ, LoopMode::Level);
+        let inserted =
+            self.loop_handle
+                .insert_source(source, move |_readiness, reader, state: &mut Self| {
+                    // calloop hands over a `NoIoDrop`, which is `Deref` but not
+                    // `DerefMut` — it will not let the source be closed out from
+                    // under the loop. `Read` is implemented for `&PipeReader`, so
+                    // a shared reference is all this needs anyway.
+                    Ok(state.advance_read(id, &*reader))
+                });
+
+        match inserted {
+            Ok(token) => {
+                self.transfers.reads.insert(
+                    id,
+                    Reading {
+                        buffer: Vec::new(),
+                        reply,
+                        token,
+                    },
+                );
+            }
+            Err(error) => {
+                let _ = reply.send(Err(Failure::Clipboard(error.to_string())));
+            }
+        }
+    }
+
+    /// Take whatever is waiting on a transfer pipe.
+    ///
+    /// One read per wake-up, in level-triggered mode, so the loop keeps turning
+    /// between chunks of a slow transfer instead of sitting in a drain loop.
+    fn advance_read(&mut self, id: u64, reader: &PipeReader) -> PostAction {
+        let mut chunk = [0_u8; CHUNK];
+        let outcome = match (&mut { reader }).read(&mut chunk) {
+            Ok(0) => Chunk::Eof,
+            Ok(read) => Chunk::Read(read),
+            Err(error) if error.kind() == ErrorKind::WouldBlock => Chunk::Again,
+            // `Interrupted` is not a failure, just a signal landing mid-read.
+            Err(error) if error.kind() == ErrorKind::Interrupted => Chunk::Again,
+            Err(error) => Chunk::Failed(error.to_string()),
+        };
+
+        let Some(entry) = self.transfers.reads.get_mut(&id) else {
+            return PostAction::Remove;
+        };
+
+        match outcome {
+            Chunk::Again => PostAction::Continue,
+            Chunk::Read(read) => {
+                entry.buffer.extend_from_slice(&chunk[..read]);
+                if entry.buffer.len() > CLIPBOARD_LIMIT {
+                    self.finish_read(
+                        id,
+                        Err(Failure::Clipboard(format!(
+                            "the selection is larger than {CLIPBOARD_LIMIT} bytes"
+                        ))),
+                    );
+                    return PostAction::Remove;
+                }
+                PostAction::Continue
+            }
+            Chunk::Eof => {
+                let bytes = std::mem::take(&mut entry.buffer);
+                // Not lossy: a client that offered UTF-8 and sent something
+                // else has a bug, and quietly substituting replacement
+                // characters would hide it inside what looks like a successful
+                // paste.
+                let answer = String::from_utf8(bytes).map(Some).map_err(|error| {
+                    Failure::Clipboard(format!("the selection is not valid UTF-8: {error}"))
+                });
+                self.finish_read(id, answer);
+                PostAction::Remove
+            }
+            Chunk::Failed(why) => {
+                self.finish_read(id, Err(Failure::Clipboard(why)));
+                PostAction::Remove
+            }
+        }
+    }
+
+    /// Answer a read and forget it.
+    ///
+    /// The loop registration is dropped by the `PostAction::Remove` that always
+    /// accompanies this, so only the bookkeeping is removed here.
+    fn finish_read(&mut self, id: u64, answer: Result<Option<String>, Failure>) {
+        if let Some(entry) = self.transfers.reads.remove(&id) {
+            let _ = entry.reply.send(answer);
+        }
+    }
+
+    /// Hand `bytes` to a client that asked to read a selection of waypuppet's.
+    ///
+    /// Written from the event loop for the same reason reads are: the client
+    /// controls how fast it drains the pipe, and on this thread there is no
+    /// acceptable amount of waiting for it.
+    fn offer_bytes(&mut self, fd: OwnedFd, bytes: Vec<u8>) {
+        if let Err(error) = set_nonblocking(&fd) {
+            tracing::warn!(%error, "cannot hand over a selection");
+            return;
+        }
+
+        let mut pending = bytes;
+        let mut sent = 0_usize;
+        let source = Generic::new(File::from(fd), Interest::WRITE, LoopMode::Level);
+        let inserted =
+            self.loop_handle
+                .insert_source(source, move |_readiness, file, _state: &mut Self| {
+                    // `&File` is `Write`, which is what a `Deref`-only `NoIoDrop`
+                    // can give — see the read side.
+                    let mut sink: &File = file;
+                    while sent < pending.len() {
+                        match sink.write(&pending[sent..]) {
+                            Ok(0) => return Ok(PostAction::Remove),
+                            Ok(wrote) => sent += wrote,
+                            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                                return Ok(PostAction::Continue);
+                            }
+                            Err(error) if error.kind() == ErrorKind::Interrupted => {}
+                            // Almost always `EPIPE`: the client asked for the
+                            // selection and then went away. Nothing to report.
+                            Err(_) => return Ok(PostAction::Remove),
+                        }
+                    }
+                    // Removing drops the source, which closes the fd — and that
+                    // close is the EOF the reader is waiting for. Leaving it
+                    // registered would hang the client instead.
+                    pending.clear();
+                    Ok(PostAction::Remove)
+                });
+
+        if let Err(error) = inserted {
+            tracing::warn!(%error, "cannot drive a selection hand-over");
+        }
+    }
+
+    /// Drop reads nobody is waiting for, closing their pipes.
+    ///
+    /// A client that owns a selection and never writes it would otherwise hold
+    /// a pipe and a loop registration for the life of the session, long after
+    /// the caller that asked gave up.
+    fn prune_transfers(&mut self) {
+        let abandoned: Vec<_> = self
+            .transfers
+            .reads
+            .iter()
+            .filter(|(_, entry)| entry.reply.is_closed())
+            .map(|(id, entry)| (*id, entry.token))
+            .collect();
+        for (id, token) in abandoned {
+            self.transfers.reads.remove(&id);
+            self.loop_handle.remove(token);
+        }
+    }
+
+    /// How many selection reads are in flight, for tests.
+    #[must_use]
+    pub fn transfers(&self) -> usize {
+        self.transfers.reads.len()
+    }
+
     /// Hand out the next window identifier.
     fn allocate_id(&mut self) -> WindowId {
         let id = WindowId(self.next_window_id);
@@ -1290,11 +1687,45 @@ impl SeatHandler for State {
     fn seat_state(&mut self) -> &mut SeatState<Self> {
         &mut self.seat_state
     }
+
+    fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {
+        // A selection is offered to the focused client and to no one else, so
+        // without this a `clipboard set` before the window appeared would be
+        // owned by the seat and visible to nobody. smithay re-offers the
+        // current selection when the focus changes, which is exactly the
+        // moment a freshly mapped window needs to be told.
+        let client = focused.and_then(Resource::client);
+        set_data_device_focus(&self.display_handle, seat, client.clone());
+        set_primary_focus(&self.display_handle, seat, client);
+    }
 }
 
 impl SelectionHandler for State {
-    // No server-side selection is ever set, so nothing needs attaching to one.
-    type SelectionUserData = ();
+    /// The text waypuppet offered, carried on the selection itself.
+    ///
+    /// Kept here rather than in a field beside it, so there is one place a
+    /// selection's contents can live and no way for the two to disagree about
+    /// which selection is current.
+    type SelectionUserData = String;
+
+    fn send_selection(
+        &mut self,
+        _ty: SelectionTarget,
+        _mime_type: String,
+        fd: OwnedFd,
+        _seat: Seat<Self>,
+        user_data: &Self::SelectionUserData,
+    ) {
+        // The mime type is not checked: only one was ever offered, so anything
+        // that got this far asked for that one.
+        self.offer_bytes(fd, user_data.clone().into_bytes());
+    }
+}
+
+impl PrimarySelectionHandler for State {
+    fn primary_selection_state(&self) -> &PrimarySelectionState {
+        &self.primary_selection_state
+    }
 }
 
 // Drag and drop between clients cannot happen in a session with one client, and
@@ -1388,6 +1819,7 @@ impl XdgShellHandler for State {
 
 delegate_compositor!(State);
 delegate_data_device!(State);
+delegate_primary_selection!(State);
 delegate_dmabuf!(State);
 delegate_shm!(State);
 delegate_seat!(State);
