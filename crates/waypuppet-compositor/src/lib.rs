@@ -18,6 +18,7 @@
 // workspace still denies it, so every use has to be justified in place.
 
 pub mod bridge;
+pub mod input;
 mod render;
 pub mod session;
 mod state;
@@ -28,11 +29,12 @@ use smithay::{
     backend::egl::EGLDevice,
     reexports::{
         calloop::{EventLoop, Interest, Mode, PostAction, generic::Generic, ping::make_ping},
-        wayland_server::Display,
+        wayland_server::{Display, protocol::wl_surface::WlSurface},
     },
     wayland::socket::ListeningSocketSource,
 };
-use waypuppet_proto::Size;
+use tokio::sync::oneshot;
+use waypuppet_proto::{Failure, Size};
 
 pub use crate::{
     bridge::{Command, Commands, Heartbeat, Snapshot},
@@ -159,7 +161,7 @@ impl Compositor {
             Display::<State>::new().map_err(|error| Error::Compositor(error.to_string()))?;
         let display_handle = display.handle();
 
-        let state = State::new(display_handle, config);
+        let state = State::new(display_handle, config)?;
 
         let socket = ListeningSocketSource::new_auto()
             .map_err(|error| Error::Compositor(error.to_string()))?;
@@ -272,6 +274,9 @@ impl Compositor {
             .map_err(|error| Error::Compositor(error.to_string()))?;
 
         self.state.space.refresh();
+        // A caller that hit its settle timeout dropped its receiver; sweeping
+        // here is what keeps those entries from accumulating.
+        self.state.prune_settling();
         self.heartbeat.beat();
         Ok(())
     }
@@ -319,5 +324,49 @@ fn handle_command(state: &mut State, command: Command) {
         // Fault injection: block the loop for real, so the heartbeat's claim
         // to detect a stall can be tested rather than believed.
         Command::Stall(duration) => std::thread::sleep(duration),
+
+        // Every mutating verb has the same shape: deliver, then hold the reply
+        // until the client draws. Delivery is immediate; only the *reply* is
+        // parked, so the loop keeps running — which it must, because the frame
+        // being waited for can only arrive through it.
+        Command::Key { chords, reply } => settle(state, reply, |state| state.deliver_key(&chords)),
+        Command::Write { text, reply } => settle(state, reply, |state| state.deliver_text(&text)),
+        Command::Pointer { to, target, reply } => {
+            settle(state, reply, |state| state.deliver_pointer(to, target));
+        }
+        Command::Click {
+            at,
+            button,
+            target,
+            reply,
+        } => settle(state, reply, |state| {
+            state.deliver_click(at, button, target)
+        }),
+        Command::Scroll { dx, dy, reply } => {
+            settle(state, reply, |state| state.deliver_scroll(dx, dy));
+        }
+        Command::Resize {
+            size,
+            target,
+            reply,
+        } => settle(state, reply, |state| state.deliver_resize(size, target)),
+    }
+}
+
+/// Deliver events, then park `reply` on the frame they should provoke.
+///
+/// A delivery that fails answers straight away — there is no frame to wait for
+/// if nothing was sent — which is also what keeps a mistyped chord from turning
+/// into a settle timeout.
+fn settle(
+    state: &mut State,
+    reply: oneshot::Sender<Result<(), Failure>>,
+    deliver: impl FnOnce(&mut State) -> Result<WlSurface, Failure>,
+) {
+    match deliver(state) {
+        Ok(surface) => state.settle_on(surface, reply),
+        Err(failure) => {
+            let _ = reply.send(Err(failure));
+        }
     }
 }

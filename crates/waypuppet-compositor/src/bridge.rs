@@ -33,7 +33,7 @@ use std::{
 
 use calloop::ping::Ping;
 use tokio::sync::{mpsc, oneshot};
-use waypuppet_proto::{Failure, Size, Window};
+use waypuppet_proto::{Button, Failure, Point, Size, Target, Window};
 
 use crate::Frame;
 
@@ -74,6 +74,58 @@ pub enum Command {
     /// Nothing reachable from the CLI or the control protocol sends it; it is a
     /// library-level affordance for waypuppet's own tests.
     Stall(Duration),
+    /// Deliver keyboard chords and settle on the next client frame.
+    Key {
+        /// Chords in caller order.
+        chords: Vec<String>,
+        /// Reply after the client settles.
+        reply: oneshot::Sender<Result<(), Failure>>,
+    },
+    /// Type text and settle on the next client frame.
+    Write {
+        /// Text to type.
+        text: String,
+        /// Reply after the client settles.
+        reply: oneshot::Sender<Result<(), Failure>>,
+    },
+    /// Move the pointer and settle on the next client frame.
+    Pointer {
+        /// Destination in target coordinates.
+        to: Point,
+        /// Coordinate target.
+        target: Target,
+        /// Reply after the client settles.
+        reply: oneshot::Sender<Result<(), Failure>>,
+    },
+    /// Click a button and settle on the next client frame.
+    Click {
+        /// Optional destination in target coordinates.
+        at: Option<Point>,
+        /// Button to click.
+        button: Button,
+        /// Coordinate target.
+        target: Target,
+        /// Reply after the client settles.
+        reply: oneshot::Sender<Result<(), Failure>>,
+    },
+    /// Scroll and settle on the next client frame.
+    Scroll {
+        /// Horizontal wheel clicks.
+        dx: i32,
+        /// Vertical wheel clicks.
+        dy: i32,
+        /// Reply after the client settles.
+        reply: oneshot::Sender<Result<(), Failure>>,
+    },
+    /// Resize and settle on the next client frame.
+    Resize {
+        /// New size.
+        size: Size,
+        /// Window target.
+        target: Target,
+        /// Reply after the client settles.
+        reply: oneshot::Sender<Result<(), Failure>>,
+    },
 }
 
 /// Proof that the compositor loop is still running.
@@ -230,6 +282,34 @@ impl Commands {
             Err(_) => Err(self.heartbeat.diagnose(ticks, started.elapsed())),
         }
     }
+
+    /// Send a mutating command and await the frame it should provoke.
+    ///
+    /// The same wait as [`Commands::ask`], with one substitution: a healthy
+    /// loop that ran out of time means the *client* did not draw, which is
+    /// [`Failure::NotSettled`] — a normal outcome about the application under
+    /// test — rather than a bare timeout. A loop that stopped ticking still
+    /// reports [`Failure::LoopStalled`], because that is waypuppet's bug and
+    /// collapsing the two is exactly what this project refuses to do.
+    ///
+    /// # Errors
+    ///
+    /// - [`Failure::NotSettled`] if the client drew nothing in time.
+    /// - [`Failure::LoopStalled`] if the compositor loop stopped.
+    /// - [`Failure::ShuttingDown`] if the compositor thread is gone.
+    /// - Whatever the command itself failed with, such as
+    ///   [`Failure::UnmappableChord`] or [`Failure::NoSuchWindow`].
+    pub async fn settle(
+        &self,
+        deadline: Duration,
+        build: impl FnOnce(oneshot::Sender<Result<(), Failure>>) -> Command,
+    ) -> Result<(), Failure> {
+        match self.ask(deadline, build).await {
+            Ok(result) => result,
+            Err(Failure::TimedOut { .. }) => Err(Failure::NotSettled),
+            Err(other) => Err(other),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -330,6 +410,55 @@ mod tests {
             started.elapsed() < Duration::from_secs(5),
             "should have failed immediately, took {:?}",
             started.elapsed(),
+        );
+    }
+
+    #[tokio::test]
+    async fn a_settling_verb_blames_the_client_when_the_loop_is_healthy() {
+        let (commands, _receiver, _source) = bridge();
+        let heartbeat = Arc::clone(commands.heartbeat());
+
+        tokio::spawn(async move {
+            loop {
+                heartbeat.beat();
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        });
+
+        let failure = commands
+            .settle(DEADLINE, |reply| Command::Write {
+                text: "hello".to_owned(),
+                reply,
+            })
+            .await
+            .expect_err("nothing answered, so this cannot succeed");
+
+        assert!(
+            matches!(failure, Failure::NotSettled),
+            "a healthy loop that ran out of time means the client did not draw, \
+             which is a fact about the application, not a timeout: {failure:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_settling_verb_still_blames_the_compositor_when_the_loop_stops() {
+        // The receiver is held but never drained: the loop is wedged. Reporting
+        // `NotSettled` here would tell the caller to go and debug a perfectly
+        // healthy application, which is exactly the confusion the two variants
+        // exist to prevent.
+        let (commands, _receiver, _source) = bridge();
+
+        let failure = commands
+            .settle(DEADLINE, |reply| Command::Write {
+                text: "hello".to_owned(),
+                reply,
+            })
+            .await
+            .expect_err("nothing answered, so this cannot succeed");
+
+        assert!(
+            matches!(failure, Failure::LoopStalled { .. }),
+            "a settling verb must not launder a stalled loop into NotSettled: {failure:?}",
         );
     }
 

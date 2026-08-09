@@ -46,6 +46,14 @@ const COMPOSITOR_DEADLINE: Duration = Duration::from_secs(15);
 /// The longest a `logs` long poll is held open before answering emptily.
 const LOG_POLL: Duration = Duration::from_secs(5);
 
+/// How long a mutating verb waits for the client to draw before giving up.
+///
+/// Shorter than [`COMPOSITOR_DEADLINE`], because the answer here is about the
+/// application rather than about waypuppet: a client that has not repainted in
+/// two seconds of software rendering is telling the caller something, and
+/// [`Failure::NotSettled`] says it faster than a long wait would.
+const SETTLE_DEADLINE: Duration = Duration::from_secs(2);
+
 /// Where a named session's control socket lives.
 ///
 /// # Errors
@@ -474,34 +482,70 @@ impl Waypuppet for Server {
         Ok(())
     }
 
-    async fn key(self, _: Context, _chords: Vec<String>) -> Result<(), Failure> {
-        Err(unimplemented("key"))
+    // Every mutating verb settles: it returns once the client has drawn in
+    // response, so `click` followed by `shot` is correct with nothing in
+    // between. That is the property waypuppet exists for, and it lives here
+    // rather than in each caller.
+
+    async fn key(self, _: Context, chords: Vec<String>) -> Result<(), Failure> {
+        self.0
+            .commands
+            .settle(SETTLE_DEADLINE, |reply| Command::Key { chords, reply })
+            .await
     }
 
-    async fn write(self, _: Context, _text: String) -> Result<(), Failure> {
-        Err(unimplemented("write"))
+    async fn write(self, _: Context, text: String) -> Result<(), Failure> {
+        self.0
+            .commands
+            .settle(SETTLE_DEADLINE, |reply| Command::Write { text, reply })
+            .await
     }
 
-    async fn pointer(self, _: Context, _to: Point, _target: Target) -> Result<(), Failure> {
-        Err(unimplemented("pointer"))
+    async fn pointer(self, _: Context, to: Point, target: Target) -> Result<(), Failure> {
+        self.0
+            .commands
+            .settle(SETTLE_DEADLINE, |reply| Command::Pointer {
+                to,
+                target,
+                reply,
+            })
+            .await
     }
 
     async fn click(
         self,
         _: Context,
-        _at: Option<Point>,
-        _button: Button,
-        _target: Target,
+        at: Option<Point>,
+        button: Button,
+        target: Target,
     ) -> Result<(), Failure> {
-        Err(unimplemented("click"))
+        self.0
+            .commands
+            .settle(SETTLE_DEADLINE, |reply| Command::Click {
+                at,
+                button,
+                target,
+                reply,
+            })
+            .await
     }
 
-    async fn scroll(self, _: Context, _dx: i32, _dy: i32) -> Result<(), Failure> {
-        Err(unimplemented("scroll"))
+    async fn scroll(self, _: Context, dx: i32, dy: i32) -> Result<(), Failure> {
+        self.0
+            .commands
+            .settle(SETTLE_DEADLINE, |reply| Command::Scroll { dx, dy, reply })
+            .await
     }
 
-    async fn resize(self, _: Context, _size: Size, _target: Target) -> Result<(), Failure> {
-        Err(unimplemented("resize"))
+    async fn resize(self, _: Context, size: Size, target: Target) -> Result<(), Failure> {
+        self.0
+            .commands
+            .settle(SETTLE_DEADLINE, |reply| Command::Resize {
+                size,
+                target,
+                reply,
+            })
+            .await
     }
 
     async fn wait(

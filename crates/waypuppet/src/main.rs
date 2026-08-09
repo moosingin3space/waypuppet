@@ -6,9 +6,10 @@
 //!
 //! # Status
 //!
-//! `doctor`, `serve`, `run`, `ps`, `shot`, `logs`, `kill` and `sessions` work.
-//! The rest are declared and fail with a message pointing at `plans/`, so
-//! `--help` shows the whole designed surface rather than only the finished
+//! `doctor`, `serve`, `run`, `ps`, `shot`, `logs`, `kill`, `sessions` and every
+//! input verb — `key`, `type`, `click`, `move`, `scroll`, `resize` — work.
+//! `wait` and `tree` are declared and fail with a message pointing at `plans/`,
+//! so `--help` shows the whole designed surface rather than only the finished
 //! part — the shape is the thing being committed to.
 
 mod client;
@@ -17,7 +18,7 @@ use std::{path::Path, path::PathBuf, process::ExitCode, time::Duration};
 
 use clap::{Parser, Subcommand};
 use waypuppet_compositor::session;
-use waypuppet_proto::{ClientState, Cursor, Size, Target, WindowId};
+use waypuppet_proto::{Button, ClientState, Cursor, Point, Size, Target, WindowId};
 
 /// Run a GUI application inside a headless compositor, then look at it and
 /// drive it.
@@ -260,6 +261,12 @@ async fn dispatch(cli: Cli) -> ExitCode {
         Command::Logs { follow } => logs(&socket, follow).await,
         Command::Sessions => sessions().await,
         Command::Kill => kill(&socket).await,
+        Command::Key { chords } => key(&socket, chords).await,
+        Command::Type { text } => write(&socket, text).await,
+        Command::Click { at, button } => click(&socket, at.as_deref(), &button).await,
+        Command::Move { x, y } => pointer(&socket, x, y).await,
+        Command::Scroll { dx, dy } => scroll(&socket, dx, dy).await,
+        Command::Resize { size, window } => resize(&socket, &size, window).await,
         ref other => Err(format!(
             "`{}` is designed but not implemented yet — see plans/",
             verb(other)
@@ -461,6 +468,99 @@ async fn logs(socket: &Path, follow: bool) -> Result<ExitCode, String> {
     }
 }
 
+// Every verb below returns only once the client has drawn in response, so
+// `waypuppet click ... && waypuppet shot ...` needs no sleep between them.
+// Success is silent: there is nothing to report but "it happened", and a
+// zero exit code already says that.
+
+/// Send key chords.
+async fn key(socket: &Path, chords: Vec<String>) -> Result<ExitCode, String> {
+    let session = client::connect(socket).await?;
+    session
+        .key(client::deadline(client::DEADLINE), chords)
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|failure| failure.to_string())?;
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Type a string.
+async fn write(socket: &Path, text: String) -> Result<ExitCode, String> {
+    let session = client::connect(socket).await?;
+    session
+        .write(client::deadline(client::DEADLINE), text)
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|failure| failure.to_string())?;
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Click a pointer button.
+async fn click(socket: &Path, at: Option<&str>, button: &str) -> Result<ExitCode, String> {
+    let at = match at {
+        Some(text) => {
+            Some(parse_point(text).ok_or_else(|| format!("--at wants X,Y, got {text:?}"))?)
+        }
+        None => None,
+    };
+    let button = parse_button(button)
+        .ok_or_else(|| format!("--button wants left, right or middle, got {button:?}"))?;
+
+    let session = client::connect(socket).await?;
+    session
+        .click(
+            client::deadline(client::DEADLINE),
+            at,
+            button,
+            Target::Focused,
+        )
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|failure| failure.to_string())?;
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Move the pointer.
+async fn pointer(socket: &Path, x: i32, y: i32) -> Result<ExitCode, String> {
+    let session = client::connect(socket).await?;
+    session
+        .pointer(
+            client::deadline(client::DEADLINE),
+            Point { x, y },
+            Target::Focused,
+        )
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|failure| failure.to_string())?;
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Scroll by wheel clicks.
+async fn scroll(socket: &Path, dx: i32, dy: i32) -> Result<ExitCode, String> {
+    let session = client::connect(socket).await?;
+    session
+        .scroll(client::deadline(client::DEADLINE), dx, dy)
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|failure| failure.to_string())?;
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Resize a window.
+async fn resize(socket: &Path, size: &str, window: Option<u32>) -> Result<ExitCode, String> {
+    let size =
+        parse_size(size).ok_or_else(|| format!("resize wants WIDTHxHEIGHT, got {size:?}"))?;
+    let target = window.map_or(Target::Focused, |id| Target::Window(WindowId(id)));
+
+    let session = client::connect(socket).await?;
+    session
+        .resize(client::deadline(client::DEADLINE), size, target)
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|failure| failure.to_string())?;
+    Ok(ExitCode::SUCCESS)
+}
+
 /// Stop the session.
 async fn kill(socket: &Path) -> Result<ExitCode, String> {
     let session = client::connect(socket).await?;
@@ -568,6 +668,28 @@ fn parse_size(text: &str) -> Option<Size> {
         width: width.trim().parse().ok()?,
         height: height.trim().parse().ok()?,
     })
+}
+
+/// Parse `X,Y`.
+fn parse_point(text: &str) -> Option<Point> {
+    let (x, y) = text.split_once(',')?;
+    Some(Point {
+        x: x.trim().parse().ok()?,
+        y: y.trim().parse().ok()?,
+    })
+}
+
+/// Parse a button name.
+///
+/// A string on the command line, an enum on the wire — the conversion happens
+/// once, here, so nothing downstream has to wonder what "mouse1" might mean.
+fn parse_button(text: &str) -> Option<Button> {
+    match text.trim().to_ascii_lowercase().as_str() {
+        "left" | "l" | "1" => Some(Button::Left),
+        "right" | "r" | "3" => Some(Button::Right),
+        "middle" | "m" | "2" => Some(Button::Middle),
+        _ => None,
+    }
 }
 
 /// The subcommand's name, for the not-implemented message.
