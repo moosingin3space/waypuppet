@@ -53,11 +53,27 @@ jobs:
       - name: Clippy
         run: ci/run.sh cargo clippy --workspace --all-targets
 
-      # No `--include-ignored`. `tests/dmabuf.rs` needs a DRM render node for its *client*
-      # half to allocate with gbm, and a GitHub-hosted runner has no /dev/dri. Those tests
-      # report as ignored, with the reason, rather than being quietly absent.
+      # No `--include-ignored` here; the dmabuf tests get their own step below, because
+      # whether they can run at all depends on the runner.
       - name: Tests
         run: ci/run.sh cargo test --workspace
+
+      # The compositor imports dmabufs fine on llvmpipe. It is the *client* half of
+      # `tests/dmabuf.rs` that needs a way to produce one, and a hosted runner has no
+      # render node — but udmabuf turns a sealed memfd into a dma-buf with no GPU at all,
+      # which is verified to work end to end with no /dev/dri present.
+      #
+      # Whether a hosted runner will load the module is the one link in this file that was
+      # not verified locally. So: try, and if it is not there, say so loudly in the run
+      # summary rather than reporting a green tick for something nobody tested.
+      - name: dmabuf import
+        run: |
+          sudo modprobe udmabuf 2>/dev/null || true
+          if [ -e /dev/udmabuf ]; then
+            ci/run.sh cargo test --workspace --test dmabuf -- --include-ignored
+          else
+            echo "::warning title=dmabuf untested::no /dev/udmabuf on this runner, so the dmabuf import path was not exercised; see docs/project-ci.md"
+          fi
 
       # A runner has no render node, so this must report software and nothing else. If it
       # ever reports hardware here, the assumption the rest of this file rests on has

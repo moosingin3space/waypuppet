@@ -41,8 +41,23 @@ fi
 
 mkdir -p "$cache/cargo" "$cache/target"
 
+# udmabuf(7), when the host has it. It turns a sealed memfd into a dma-buf with no GPU
+# involved, which is what lets `tests/dmabuf.rs` run its client half here — this image
+# stands in for a runner, and a runner has no render node.
+#
+# Deliberately *not* forwarding /dev/dri. This image exists to reproduce a machine without
+# one, and handing it the host's GPU is worse than pointless: the container's Mesa does not
+# match the host's kernel driver, and the capture tests segfault. The GPU path is covered
+# by `just check`, in the Flatpak sandbox, which is built for it.
+devices=""
+if [ -e /dev/udmabuf ]; then
+    devices="--device /dev/udmabuf"
+fi
+
 # `:Z` relabels for SELinux, which podman needs on Fedora-family hosts and docker ignores.
+# shellcheck disable=SC2086  # $devices is a deliberately word-split flag list
 exec "$engine" run --rm \
+    $devices \
     --volume "$root:/workspace:Z" \
     --volume "$cache/cargo:/cargo:Z" \
     --volume "$cache/target:/target:Z" \
