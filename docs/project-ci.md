@@ -52,20 +52,31 @@ the software path gets exercised on every commit, and it is the environment most
 waypuppet's users will run in. If the software path breaks, CI should be the thing that
 notices.
 
-This turned out to have a sharper edge than "the software path gets exercised". The
-compositor needs only EGL, and llvmpipe supplies that anywhere. The *client* side of
-[`tests/dmabuf.rs`](../crates/waypuppet-compositor/tests/dmabuf.rs) allocates its buffer
-with gbm, which needs a real `/dev/dri/renderD*` — so those four tests cannot run on a
-hosted runner at all.
+This has a sharper edge than "the software path gets exercised", and it is worth being
+precise about which half needs what.
 
-They are marked `#[ignore]` with that reason, so `cargo test` prints them as ignored rather
-than omitting them silently, and `just test` passes `--include-ignored` because a
-development machine has a render node. **CI does not cover the dmabuf import path.** That
-is the honest state, and the reason the GPU job below is worth more than it looks.
+The **compositor** needs only EGL, and llvmpipe supplies that anywhere — it advertises
+dmabuf formats and imports them perfectly well with no GPU. The **client** side of
+[`tests/dmabuf.rs`](../crates/waypuppet-compositor/tests/dmabuf.rs) has to *produce* a
+dmabuf, and that is the part a runner cannot obviously do.
 
-A GPU job on a self-hosted runner with a render node is the missing piece: it would run
-`cargo test --workspace -- --include-ignored` and cover what llvmpipe hides. Treat it as a
-second job that is allowed to be slower and rarer, never as the one that gates merges.
+It can, though, via [`udmabuf(7)`](https://docs.kernel.org/driver-api/dma-buf.html): a
+sealed `memfd` becomes a dma-buf with no GPU involved. The fixture tries a render node
+first, so a development machine exercises the path a real toolkit takes, and falls back to
+udmabuf otherwise. **Verified with no `/dev/dri` present at all** — llvmpipe imports a
+udmabuf-backed buffer and composites it correctly, and the dmabuf-versus-shm comparison
+passes too.
+
+So the tests stay `#[ignore]` — a machine can still have neither source — and the
+`dmabuf import` step tries `modprobe udmabuf` and runs them when it succeeds. **Whether a
+hosted runner has the module is the one thing here not verified locally.** When it does
+not, the step emits a warning annotation rather than a green tick, because "we did not test
+this" and "this passed" must not look the same.
+
+A GPU job on a self-hosted runner is still worth having: udmabuf covers the import, but
+only for a linear buffer that a real driver never produced. Tiled modifiers and format
+negotiation against an actual GPU are what it would add. Treat it as a second job that is
+allowed to be slower and rarer, never as the one that gates merges.
 
 ## What runs
 

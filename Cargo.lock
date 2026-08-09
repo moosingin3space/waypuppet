@@ -1688,6 +1688,7 @@ version = "0.1.0"
 dependencies = [
  "calloop",
  "futures",
+ "libc",
  "png",
  "smithay",
  "tarpc",
