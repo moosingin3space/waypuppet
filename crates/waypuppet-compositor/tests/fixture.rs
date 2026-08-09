@@ -33,7 +33,7 @@
 
 use std::{
     io::Write as _,
-    os::unix::{io::AsFd as _, net::UnixStream},
+    os::unix::{fs::FileExt as _, io::AsFd as _, net::UnixStream},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, MutexGuard, PoisonError,
@@ -43,13 +43,18 @@ use std::{
     time::{Duration, Instant},
 };
 
+use smithay::input::keyboard::xkb;
+use tokio::sync::oneshot;
 use wayland_client::{
     Connection, Dispatch, EventQueue, QueueHandle,
     globals::{GlobalListContents, registry_queue_init},
     protocol::{
         wl_buffer::WlBuffer,
         wl_compositor::WlCompositor,
+        wl_keyboard::{self, KeyState, KeymapFormat, WlKeyboard},
+        wl_pointer::{self, ButtonState, WlPointer},
         wl_registry::WlRegistry,
+        wl_seat::{self, WlSeat},
         wl_shm::{self, WlShm},
         wl_shm_pool::WlShmPool,
         wl_surface::WlSurface,
@@ -60,8 +65,8 @@ use wayland_protocols::xdg::shell::client::{
     xdg_toplevel::{self, XdgToplevel},
     xdg_wm_base::{self, XdgWmBase},
 };
-use waypuppet_compositor::{Compositor, Config, Frame, State};
-use waypuppet_proto::Size;
+use waypuppet_compositor::{Command, Compositor, Config, Frame, State};
+use waypuppet_proto::{Failure, Size};
 
 /// How long any single harness wait may take before it fails with a diagnosis.
 pub const WAIT_LIMIT: Duration = Duration::from_secs(10);
@@ -75,6 +80,51 @@ pub const WATCHDOG_LIMIT: Duration = Duration::from_mins(1);
 
 /// How long each tick may block waiting for events.
 const TICK: Duration = Duration::from_millis(5);
+
+/// One input event, as the client saw it.
+///
+/// Deliberately the client's view rather than the compositor's: keys are
+/// resolved through the keymap the compositor actually sent over the wire, so a
+/// reverse index that produced the wrong keycode fails here. Asserting against
+/// waypuppet's own idea of the keymap would be circular.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Input {
+    /// A key, named by the keysym it resolved to under the current modifiers.
+    Key {
+        /// The keysym's xkb name, such as `a`, `A` or `Return`.
+        name: String,
+        /// Whether this was a press.
+        pressed: bool,
+    },
+    /// The pointer entered the surface, at surface-local coordinates.
+    Enter {
+        /// Horizontal position within the surface.
+        x: i32,
+        /// Vertical position within the surface.
+        y: i32,
+    },
+    /// The pointer moved, at surface-local coordinates.
+    Motion {
+        /// Horizontal position within the surface.
+        x: i32,
+        /// Vertical position within the surface.
+        y: i32,
+    },
+    /// A pointer button, as a Linux input-event code.
+    Button {
+        /// The button code, such as `0x110` for the left button.
+        code: u32,
+        /// Whether this was a press.
+        pressed: bool,
+    },
+    /// A discrete scroll, in `v120` units — 120 per wheel click.
+    Scroll {
+        /// Horizontal steps, positive rightwards.
+        horizontal: i32,
+        /// Vertical steps, positive downwards.
+        vertical: i32,
+    },
+}
 
 // ---------------------------------------------------------------- watchdog --
 
@@ -221,6 +271,21 @@ impl Harness {
         self.compositor.state()
     }
 
+    /// The bridge, for a test that wants to park a reply and keep going.
+    #[must_use]
+    pub fn commands(&self) -> waypuppet_compositor::Commands {
+        self.compositor.commands()
+    }
+
+    /// How many iterations the compositor loop has completed.
+    ///
+    /// The evidence that a call which failed to settle was the client's doing
+    /// and not a stalled loop.
+    #[must_use]
+    pub fn ticks(&self) -> u64 {
+        self.compositor.heartbeat().ticks()
+    }
+
     /// Composite and read back the current frame.
     ///
     /// # Panics
@@ -278,7 +343,7 @@ impl Harness {
     ///
     /// Panics if no configure arrives within [`WAIT_LIMIT`].
     pub fn configure(&mut self, client: &mut ClientThread) -> (i32, i32) {
-        client.send(Command::Configure);
+        client.send(ClientCommand::Configure);
         match self.await_reply(client, "the client to be configured") {
             Reply::Configured(width, height) => (width, height),
             other => panic!("expected a configure, got {other:?}"),
@@ -291,8 +356,61 @@ impl Harness {
     ///
     /// Panics if the paint does not complete within [`WAIT_LIMIT`].
     pub fn paint(&mut self, client: &mut ClientThread, rgba: [u8; 4]) {
-        client.send(Command::Paint(rgba));
+        client.send(ClientCommand::Paint(rgba));
         self.await_reply(client, "the client to paint");
+    }
+
+    /// Hand back the input the client has received since the last call.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the client does not answer within [`WAIT_LIMIT`].
+    pub fn input(&mut self, client: &mut ClientThread) -> Vec<Input> {
+        client.send(ClientCommand::Drain);
+        match self.await_reply(client, "the client to report its input") {
+            Reply::Input(input) => input,
+            other => panic!("expected input, got {other:?}"),
+        }
+    }
+
+    /// Queue a bridge command and tick until it is answered.
+    ///
+    /// `None` means `limit` passed with nothing sent back, which for a settling
+    /// verb is the interesting case: the events were delivered and the client
+    /// did not draw. The compositor is ticking throughout, so a `None` here is a
+    /// statement about the client rather than about the loop.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the compositor thread has gone away, or if a tick fails.
+    pub fn deliver(
+        &mut self,
+        what: &str,
+        limit: Duration,
+        build: impl FnOnce(oneshot::Sender<Result<(), Failure>>) -> Command,
+    ) -> Option<Result<(), Failure>> {
+        let _guard = self.watch.begin(what);
+        let (reply_tx, mut reply_rx) = oneshot::channel();
+        self.compositor
+            .commands()
+            .send(build(reply_tx))
+            .expect("the compositor is listening");
+
+        let deadline = Instant::now() + limit;
+        while Instant::now() < deadline {
+            match reply_rx.try_recv() {
+                Ok(reply) => return Some(reply),
+                Err(oneshot::error::TryRecvError::Empty) => {
+                    self.compositor.tick(TICK).expect("the compositor ticks");
+                }
+                // The compositor dropped the sender without answering, which is
+                // the shutdown path rather than a timeout.
+                Err(oneshot::error::TryRecvError::Closed) => {
+                    return Some(Err(Failure::ShuttingDown));
+                }
+            }
+        }
+        None
     }
 
     /// Shut the client down, ticking until its thread has finished.
@@ -301,7 +419,7 @@ impl Harness {
     ///
     /// Panics if the client does not stop within [`WAIT_LIMIT`].
     pub fn stop(&mut self, mut client: ClientThread) {
-        client.send(Command::Stop);
+        client.send(ClientCommand::Stop);
         self.await_reply(&mut client, "the client to stop");
         if let Some(join) = client.join.take() {
             join.join().expect("the client thread finishes cleanly");
@@ -351,7 +469,7 @@ impl Harness {
 /// Deliberately has no blocking methods of its own — everything goes through
 /// [`Harness`], which ticks while it waits.
 pub struct ClientThread {
-    commands: Sender<Command>,
+    commands: Sender<ClientCommand>,
     replies: Receiver<Reply>,
     join: Option<JoinHandle<()>>,
     /// Set once a configure has been seen and acked.
@@ -366,7 +484,7 @@ impl ClientThread {
     }
 
     /// Queue a command for the client thread.
-    fn send(&self, command: Command) {
+    fn send(&self, command: ClientCommand) {
         // A closed channel means the thread has died, and `await_reply` turns
         // that into a useful panic, so there is nothing to say here.
         let _ = self.commands.send(command);
@@ -374,11 +492,13 @@ impl ClientThread {
 }
 
 /// What the harness can ask a client to do.
-enum Command {
+enum ClientCommand {
     /// Block until configured, and report the size.
     Configure,
     /// Fill the window and commit.
     Paint([u8; 4]),
+    /// Report the input received since the last drain.
+    Drain,
     /// Disconnect and finish.
     Stop,
 }
@@ -390,6 +510,8 @@ enum Reply {
     Connected,
     /// Configured to this size.
     Configured(i32, i32),
+    /// Everything received since the last drain.
+    Input(Vec<Input>),
     /// The last command finished.
     Done,
 }
@@ -398,7 +520,7 @@ enum Reply {
 fn client_thread(
     socket: &Path,
     title: &str,
-    commands: &Receiver<Command>,
+    commands: &Receiver<ClientCommand>,
     replies: &Sender<Reply>,
 ) {
     let mut client = Client::connect(socket, title);
@@ -409,15 +531,16 @@ fn client_thread(
     let mut size = (0, 0);
     while let Ok(command) = commands.recv() {
         let reply = match command {
-            Command::Configure => {
+            ClientCommand::Configure => {
                 size = client.wait_for_configure();
                 Reply::Configured(size.0, size.1)
             }
-            Command::Paint(rgba) => {
+            ClientCommand::Paint(rgba) => {
                 client.paint(size, rgba);
                 Reply::Done
             }
-            Command::Stop => {
+            ClientCommand::Drain => Reply::Input(client.drain()),
+            ClientCommand::Stop => {
                 let _ = replies.send(Reply::Done);
                 return;
             }
@@ -441,6 +564,9 @@ struct Client {
     shm: WlShm,
     surface: WlSurface,
     _toplevel: XdgToplevel,
+    /// Held so the compositor keeps sending to them.
+    _keyboard: WlKeyboard,
+    _pointer: WlPointer,
     /// Held so the buffer outlives the commit that referenced it.
     buffer: Option<(WlShmPool, WlBuffer)>,
     events: Events,
@@ -453,6 +579,52 @@ struct Events {
     configured: Option<(i32, i32)>,
     /// Whether an `xdg_surface.configure` arrived and was acked.
     surface_configured: bool,
+    /// Built from the keymap the compositor sent, and updated from every
+    /// `modifiers` event — which is how a real toolkit turns a keycode into a
+    /// character, and therefore the only honest way to check one.
+    xkb: Option<xkb::State>,
+    /// Input received since the last drain.
+    input: Vec<Input>,
+}
+
+impl Events {
+    /// Compile the keymap the compositor handed over.
+    ///
+    /// Read positionally rather than by seeking: the fd may be a dup of one the
+    /// compositor keeps, so moving its offset would be moving somebody else's.
+    /// mmap is the usual answer here and is the one thing this workspace will
+    /// not write, since it needs `unsafe`.
+    fn adopt_keymap(&mut self, format: KeymapFormat, fd: std::os::fd::OwnedFd, size: u32) {
+        assert_eq!(
+            format,
+            KeymapFormat::XkbV1,
+            "the compositor must send an xkb keymap",
+        );
+        let file = std::fs::File::from(fd);
+        let mut bytes = vec![0_u8; size as usize];
+        file.read_exact_at(&mut bytes, 0).expect("the keymap reads");
+        // The keymap is NUL-terminated on the wire.
+        let text = String::from_utf8_lossy(&bytes)
+            .trim_end_matches('\0')
+            .to_owned();
+
+        let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+        let keymap = xkb::Keymap::new_from_string(
+            &context,
+            text,
+            xkb::KEYMAP_FORMAT_TEXT_V1,
+            xkb::KEYMAP_COMPILE_NO_FLAGS,
+        )
+        .expect("the compositor's keymap compiles");
+        self.xkb = Some(xkb::State::new(&keymap));
+    }
+
+    /// Name the keysym a keycode produces under the current modifiers.
+    fn name(&self, evdev: u32) -> String {
+        let state = self.xkb.as_ref().expect("a keymap arrived before any key");
+        // The wire carries evdev codes; xkb numbers the same keys eight higher.
+        xkb::keysym_get_name(state.key_get_one_sym(xkb::Keycode::new(evdev + 8)))
+    }
 }
 
 impl Client {
@@ -471,6 +643,9 @@ impl Client {
         let compositor: WlCompositor = globals.bind(&handle, 1..=6, ()).expect("wl_compositor");
         let shm: WlShm = globals.bind(&handle, 1..=1, ()).expect("wl_shm");
         let wm_base: XdgWmBase = globals.bind(&handle, 1..=5, ()).expect("xdg_wm_base");
+        // Version 8 or better, so discrete scrolls arrive as `v120` steps
+        // rather than only as accumulated values.
+        let seat: WlSeat = globals.bind(&handle, 8..=9, ()).expect("wl_seat");
 
         // A missing global is the difference between "the app is slow" and "the
         // app hangs forever with no error", so check rather than assume.
@@ -482,6 +657,11 @@ impl Client {
                 );
             }
         });
+
+        // waypuppet's seat always has both, so there is no need to wait for the
+        // capabilities event before asking.
+        let keyboard = seat.get_keyboard(&handle, ());
+        let pointer = seat.get_pointer(&handle, ());
 
         let surface = compositor.create_surface(&handle, ());
         let xdg_surface = wm_base.get_xdg_surface(&surface, &handle, ());
@@ -499,9 +679,25 @@ impl Client {
             shm,
             surface,
             _toplevel: toplevel,
+            _keyboard: keyboard,
+            _pointer: pointer,
             buffer: None,
             events: Events::default(),
         }
+    }
+
+    /// Dispatch whatever has arrived and hand back the input in it.
+    fn drain(&mut self) -> Vec<Input> {
+        // A roundtrip rather than a bare dispatch: it guarantees everything the
+        // compositor had already sent has been read, so an empty result means
+        // "nothing was sent" rather than "nothing had arrived yet".
+        self.connection
+            .roundtrip()
+            .expect("the connection is healthy");
+        self.queue
+            .dispatch_pending(&mut self.events)
+            .expect("the connection is healthy");
+        std::mem::take(&mut self.events.input)
     }
 
     /// Dispatch until the compositor has configured us, and return the size.
@@ -633,6 +829,129 @@ impl Dispatch<XdgToplevel, ()> for Events {
     ) {
         if let xdg_toplevel::Event::Configure { width, height, .. } = event {
             state.configured = Some((width, height));
+        }
+    }
+}
+
+impl Dispatch<WlSeat, ()> for Events {
+    fn event(
+        _state: &mut Self,
+        _seat: &WlSeat,
+        _event: wl_seat::Event,
+        _data: &(),
+        _connection: &Connection,
+        _handle: &QueueHandle<Self>,
+    ) {
+        // Capabilities and the seat's name are not interesting here: waypuppet
+        // always offers a keyboard and a pointer, and the client asked for both
+        // up front.
+    }
+}
+
+impl Dispatch<WlKeyboard, ()> for Events {
+    fn event(
+        state: &mut Self,
+        _keyboard: &WlKeyboard,
+        event: wl_keyboard::Event,
+        _data: &(),
+        _connection: &Connection,
+        _handle: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_keyboard::Event::Keymap { format, fd, size } => {
+                state.adopt_keymap(
+                    format.into_result().expect("a known keymap format"),
+                    fd,
+                    size,
+                );
+            }
+            // Modifiers arrive before the key they apply to, which is what
+            // makes `shift+a` resolve to `A` below rather than to `a`.
+            wl_keyboard::Event::Modifiers {
+                mods_depressed,
+                mods_latched,
+                mods_locked,
+                group,
+                ..
+            } => {
+                if let Some(xkb) = state.xkb.as_mut() {
+                    xkb.update_mask(mods_depressed, mods_latched, mods_locked, 0, 0, group);
+                }
+            }
+            wl_keyboard::Event::Key {
+                key,
+                state: key_state,
+                ..
+            } => {
+                let pressed =
+                    key_state.into_result().expect("a known key state") == KeyState::Pressed;
+                let name = state.name(key);
+                state.input.push(Input::Key { name, pressed });
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Round a surface-local coordinate to a whole pixel.
+///
+/// The wire carries fixed-point; waypuppet only ever aims at whole pixels, so
+/// anything else here would be a bug rather than a rounding question.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the clamp above is what makes the cast exact"
+)]
+fn whole(value: f64) -> i32 {
+    // Saturating rather than `as`: a coordinate outside i32 is a bug worth
+    // seeing as a wildly wrong assertion rather than as a wrapped one.
+    value
+        .round()
+        .clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32
+}
+
+impl Dispatch<WlPointer, ()> for Events {
+    fn event(
+        state: &mut Self,
+        _pointer: &WlPointer,
+        event: wl_pointer::Event,
+        _data: &(),
+        _connection: &Connection,
+        _handle: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_pointer::Event::Enter {
+                surface_x,
+                surface_y,
+                ..
+            } => state.input.push(Input::Enter {
+                x: whole(surface_x),
+                y: whole(surface_y),
+            }),
+            wl_pointer::Event::Motion {
+                surface_x,
+                surface_y,
+                ..
+            } => state.input.push(Input::Motion {
+                x: whole(surface_x),
+                y: whole(surface_y),
+            }),
+            wl_pointer::Event::Button {
+                button,
+                state: button_state,
+                ..
+            } => state.input.push(Input::Button {
+                code: button,
+                pressed: button_state.into_result().expect("a known button state")
+                    == ButtonState::Pressed,
+            }),
+            wl_pointer::Event::AxisValue120 { axis, value120 } => {
+                let axis = axis.into_result().expect("a known axis");
+                state.input.push(Input::Scroll {
+                    horizontal: i32::from(axis == wl_pointer::Axis::HorizontalScroll) * value120,
+                    vertical: i32::from(axis == wl_pointer::Axis::VerticalScroll) * value120,
+                });
+            }
+            _ => {}
         }
     }
 }
