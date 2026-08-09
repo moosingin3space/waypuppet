@@ -120,12 +120,14 @@ Early, and honest about which half is which.
 compositor. `ps`, `shot`, `logs`, `kill` and `sessions` answer over the control socket, and
 `shot` produces a real PNG of what the client drew. A client that dies during startup is
 reported with its exit status, how long it lasted, whether it ever mapped a window, and
-everything it wrote — which is the failure this project was started over.
+everything it wrote — which is the failure this project was started over. Input works:
+`key`, `type`, `click`, `move`, `scroll` and `resize` deliver real events through the seat,
+and each one returns only once the client has drawn in response.
 
-**Not yet.** Input (`key`, `type`, `click`), `wait`, the clipboard, and the accessibility
-tree. And `zwp_linux_dmabuf_v1`, which matters more than it sounds: anything Skia-backed
-renders through EGL and will not draw without it, so no real toolkit has been hosted yet.
-The transcript at the top of this file is the design, not a recording.
+**Not yet.** `wait`, the clipboard, and the accessibility tree. And
+`zwp_linux_dmabuf_v1`, which matters more than it sounds: anything Skia-backed renders
+through EGL and will not draw without it, so no real toolkit has been hosted yet. The
+transcript at the top of this file is the design, not a recording.
 
 [CLAUDE.md] has the architecture, [plans/](plans/) has one file per phase with its status
 and what it taught us, and [docs/](docs/) covers using waypuppet in CI.

@@ -122,6 +122,37 @@ They return once the client has committed a frame in response, or the settle tim
 elapses. This is the whole reason waypuppet exists rather than a shell script with
 `sleep 0.5` in it, so it belongs in the compositor, not in each caller.
 
+The mechanism is a parked `oneshot::Sender` held in `State::settling`, answered on the next
+commit *after* the events went out — not on the loop going quiet, because a client that
+repaints continuously is never quiet. `Commands::settle` is the control-thread half, and it
+is `ask` with exactly one substitution: a healthy loop that ran out of time is
+`NotSettled`, a loop that stopped ticking is still `LoopStalled`. Keep it a wrapper, so the
+heartbeat stays the single place that decides whose fault a timeout is.
+
+### Input resolves against a pinned keymap
+
+The layout is `us` and is stated in `input::LAYOUT`, not inherited from the environment:
+chord parsing resolves against the keymap, so a layout that varied by machine would make
+`waypuppet key at` mean different things in different places. The seat and the reverse
+index are built from one `input::xkb_config()` for the same reason.
+
+The reverse index asks an `xkb::State` under a modifier mask what each keycode produces,
+rather than assuming level 0 is unshifted and level 1 is shifted. That assumption holds for
+`us` and is not a promise; the state query is the same computation the client will run
+against the same keymap, so the two cannot disagree.
+
+A request is resolved in full before any of it is sent — every chord parsed, every
+character checked — so a typo names itself instead of surfacing as whatever else is wrong,
+and `type` is all-or-nothing. Half a string in a text field is a worse outcome than an
+error.
+
+### The pointer always has a position
+
+When a window maps it gets keyboard focus *and* the pointer, parked at its centre. Without
+a starting position, `scroll` and a `click` with no coordinates have no pointer focus to go
+to: the events vanish and the call fails as `NotSettled`, which blames the application for
+waypuppet's omission. The centre is arbitrary but fixed, which is what determinism needs.
+
 ### smithay features
 
 Default features are off; the selection and its reasoning live on
@@ -251,11 +282,12 @@ cannot fail reads as coverage and is worse than none.
 Working end to end: `waypuppet run` starts a session, hosts a child process against a real
 compositor, and `ps`, `shot`, `logs`, `kill` and `sessions` answer over the control socket.
 A client that dies on startup is reported with its exit status, how long it lasted, whether
-it ever mapped a window, and everything it wrote.
+it ever mapped a window, and everything it wrote. Input works too — `key`, `type`, `click`,
+`move`, `scroll` and `resize` deliver real events through the seat and return only once the
+client has drawn in response.
 
-Not yet: input (`key`, `type`, `click`), `wait`, the accessibility tree, and
-`zwp_linux_dmabuf_v1` — without which nothing that renders through EGL will draw, so no
-real toolkit has been hosted yet.
+Not yet: `wait`, the accessibility tree, and `zwp_linux_dmabuf_v1` — without which nothing
+that renders through EGL will draw, so no real toolkit has been hosted yet.
 
 **The roadmap lives in [`plans/`](plans/)** — one file per phase, in the order they should
 land, each with its own acceptance criteria and, once landed, what it taught us.

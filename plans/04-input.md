@@ -1,6 +1,6 @@
 # 04 — Input
 
-**Status:** not started
+**Status:** landed
 **Depends on:** [03](03-control-socket.md), which landed the bridge these verbs travel over
 
 ## Goal
@@ -59,3 +59,52 @@ only once the client has drawn the result.
   its own timer. Do not synthesise repeats.
 - Focus follows the single window for now. It becomes a real question only if multiple
   windows ever land.
+
+## What it landed
+
+`crates/waypuppet-compositor/src/input.rs` is the keymap and the chord parser;
+`State::deliver_*` sends the events; `State::settle_on` parks the reply;
+`Commands::settle` is the control-thread half. The CLI verbs `key`, `type`, `click`,
+`move`, `scroll` and `resize` all work over the socket.
+
+## What it taught us
+
+- **Asking the xkb *state*, not the keymap's levels, is what makes the reverse index
+  exact.** The tempting build is "level 0 is unshifted, level 1 is shifted", which is true
+  of `us` and not a promise. Setting the shift mask on an `xkb::State` and asking what each
+  keycode produces is the same computation the client will run against the same keymap, so
+  the two cannot disagree. It is also no more code.
+
+- **The pointer needs a starting position, or half the surface silently does nothing.**
+  `scroll`, and `click` with no coordinates, go to whatever the pointer is over. With no
+  initial position there is no pointer focus, the events go nowhere, and the call fails as
+  `NotSettled` — a completely misleading diagnosis. The pointer is now parked at the centre
+  of a window when it maps, alongside keyboard focus. Fixed rather than clever, because
+  determinism is the constraint.
+
+- **Parse before you look up the window.** `key hyper+z` against a session with no window
+  first reported `no such window`, which is true but useless — the caller's actual mistake
+  was the chord. Resolving the whole request before touching state costs nothing and makes
+  the error name the real problem. The same ordering is what makes `type` all-or-nothing.
+
+- **`Commands::settle` is `ask` with one substitution, and that substitution is the
+  interesting part.** A healthy loop that ran out of time means the client did not draw
+  (`NotSettled`); a loop that stopped ticking still means waypuppet is broken
+  (`LoopStalled`). Writing it as a wrapper rather than a second wait keeps the heartbeat as
+  the single place that decides whose fault a timeout is. Both branches are tested, and
+  both were checked by mutating the code — laundering `LoopStalled` into `NotSettled` fails
+  exactly one test, which is the one written for it.
+
+- **A parked sender wants an explicit answer, not just a drop.** Dropping does wake the
+  receiver, but the caller then sees `ShuttingDown`, which is wrong for a window that
+  merely closed. `toplevel_destroyed` answers its settlers with `ClientGone`; the drop
+  remains the backstop for a compositor thread that dies. Abandoned senders — a caller that
+  hit its own timeout — are swept each tick using `Sender::is_closed`.
+
+## Not verified here
+
+`type 'hello'` into a real text field, from the "Done when" list above, is still open:
+nothing that renders through EGL can be hosted until `zwp_linux_dmabuf_v1` lands, so there
+is no toolkit to type into yet. The wire-level claim — that the right keysyms arrive in the
+right order, resolved through the keymap the compositor actually sent — is covered by
+`tests/input.rs`.

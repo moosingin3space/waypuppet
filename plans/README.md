@@ -15,7 +15,7 @@ instead.
 | 01 | [Compositor core](01-compositor-core.md) — a client can connect and map a window | **done** |
 | 02 | [Rendering and capture](02-rendering-and-capture.md) — a frame becomes a PNG | in progress |
 | 03 | [Control socket](03-control-socket.md) — `run`, `ps`, `shot`, `logs`, `kill` | mostly done |
-| 04 | [Input](04-input.md) — `key`, `type`, `click`, `move`, `scroll` | not started |
+| 04 | [Input](04-input.md) — `key`, `type`, `click`, `move`, `scroll` | **done** |
 | 05 | [Wait](05-wait.md) — block on protocol facts, not on sleeps | not started |
 | 06 | [Clipboard and resize](06-clipboard-and-resize.md) — what a terminal exercises | not started |
 | 07 | [Accessibility tree](07-accessibility-tree.md) — semantic selectors | not started |
@@ -24,8 +24,11 @@ instead.
 Phases 01–03 were the spine, and they have landed: a session can be started, hosted,
 screenshotted and stopped. What is left of them is listed in each plan's "Still to do".
 
-04 and 05 are what make it trustworthy rather than merely possible — input that settles,
-and waiting on facts instead of sleeping. 06 and 07 are driven by
+04 has landed as well: input goes through the seat and every mutating verb settles on the
+client's next frame, which is what makes `click` followed by `shot` correct with nothing in
+between. 05 is what remains of making waypuppet trustworthy rather than merely possible —
+waiting on facts instead of sleeping, reusing the parked-sender machinery 04 built. 06 and
+07 are driven by
 [example-app](../../example-app) specifically. 08 is numbered last but not ranked last: it only
 needs 03, and it is what decides whether waypuppet is pleasant to reach for or a thing you
 have to remember how to set up.
