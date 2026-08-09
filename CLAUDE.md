@@ -165,6 +165,20 @@ startup instead of at the first `shot`, and offers no dmabuf global. `DmabufHand
 dmabuf_imported` imports each buffer and answers the `ImportNotifier` honestly, so a client
 finds out at the moment it asks rather than by getting a blank window.
 
+### Forcing software rendering is a filter, not a preference
+
+`Config::rendering` is a `Rendering` — `Fastest`, `Software`, or `Device(path)` — and
+`--software` on `run` and `serve` picks the second. It never falls back to a GPU: a machine
+with no llvmpipe fails to start.
+
+That is the whole point. llvmpipe and a GPU driver antialias and filter differently, so a
+golden image is only comparable against a capture from the same renderer, and CI has no
+render node. A silent fallback would make every golden wrong without anyone noticing, which
+is worse than not starting. `run --detach` forwards the flag for the same reason.
+
+Tests that ask for a renderer assert they got it, via `Harness::renders_in_software`.
+Without that, a `Rendering::Software` test passes on a GPU and covers nothing.
+
 ### smithay features
 
 Default features are off; the selection and its reasoning live on

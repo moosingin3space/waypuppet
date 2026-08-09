@@ -1,6 +1,6 @@
 # 02 — Rendering and capture
 
-**Status:** in progress — capture and dmabuf both work; a `--software` flag is what remains
+**Status:** done
 **Depends on:** [01](01-compositor-core.md)
 
 ## Goal
@@ -71,18 +71,6 @@ time and do work in between. The capture test needs it, and so will plan 03's br
 centre pixel is that colour. A second test asserts an empty session captures as opaque
 black. `tests/fixture.rs` is the shared `wl_shm` client both test binaries use.
 
-## Still to do
-
-- Explicitly exercise the software device, rather than trusting that the fallback works
-  because the hardware path does. `tests/dmabuf.rs` runs against whatever device EGL
-  picks, which on a developer machine is the GPU — so nothing yet proves llvmpipe imports
-  a dmabuf, and CI is exactly where that would matter. Needs the `--software` flag below.
-- **A way to force software rendering.** `Config::render_node` can name a device, but
-  nothing on the CLI forces llvmpipe where a GPU exists. Golden-image testing needs it —
-  goldens have to be generated on the same renderer CI will use, and CI is almost always
-  software. [`docs/ci.md`](../docs/ci.md) documents the practice and currently has to admit
-  the flag is missing.
-
 ## What dmabuf landed
 
 `Renderer` now exposes its importable formats, its render node and an `import_dmabuf`, and
@@ -97,6 +85,26 @@ exports it, hands the descriptors over the protocol, and asserts the capture sho
 colour. A second test paints the same colour through both `wl_shm` and dmabuf and requires
 the two captures to be byte-identical, so a golden image is valid whichever kind of client
 produced it.
+
+## What `--software` landed
+
+`Config::render_node: Option<PathBuf>` became `Config::rendering: Rendering` — `Fastest`,
+`Software`, or `Device(path)` — and `--software` on `run` and `serve` selects the middle
+one. `run --detach` forwards it, because a detached session quietly rendering on the GPU
+while the foreground one used llvmpipe is precisely the bug the flag exists to prevent.
+
+It is a filter, not a preference: a machine with no llvmpipe fails to start rather than
+falling back, and the "nothing matched" error names which of the three requests went
+unsatisfied, since the fixes are entirely different.
+
+`tests/capture.rs` and `tests/dmabuf.rs` now run every case twice, once on `Fastest` and
+once on `Software`, which closes the "explicitly exercise the software device" item. On
+this machine llvmpipe does import dmabufs — `EGL_EXT_image_dma_buf_import` is present — so
+the software dmabuf path is real rather than assumed.
+
+## Still to do
+
+Nothing.
 
 ## What we learned
 
@@ -120,6 +128,13 @@ produced it.
   `zwp_linux_dmabuf_v1` unconditionally in the shared fixture coupled `handshake`,
   `control` and `input` — none of which need to render — to EGL coming up. It is bound
   optionally, and `paint_dmabuf` is the only thing that complains when it is missing.
+
+- **A test that asks for a renderer has to check it got one.** Running the same body under
+  `Rendering::Software` proves nothing on its own: if the flag silently fell back, the test
+  would pass on the GPU and the software path would be untested while looking covered.
+  `Harness::renders_in_software` makes the assertion possible, and mutating `Software` from
+  a filter into a preference fails exactly those tests. This is the same shape as the
+  dmabuf skip: a test whose subject can quietly change is a test that cannot fail.
 
 - **The `unsafe` exception is real, and it is one place.** `EGLDisplay::new` and
   `GlesRenderer::new` are both `unsafe fn`. The crate's `#![forbid(unsafe_code)]` had to

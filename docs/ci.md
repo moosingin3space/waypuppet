@@ -88,11 +88,18 @@ everything that affects rasterisation is pinned:
 - **Pin the size and scale.** `--size 1280x800 --scale 1` on every run, including when you
   regenerate the goldens.
 - **Pin the renderer.** Generate goldens the same way CI will. Since CI is almost certainly
-  software, generate them under software rendering everywhere. Goldens made on a GPU and
-  checked under llvmpipe will fail, and the diff will look like noise. waypuppet currently
-  picks hardware when it can and has no flag to force software — that flag is
-  [outstanding](../plans/02-rendering-and-capture.md), and until it exists this is the one
-  piece of this page you cannot actually follow.
+  software, pass `--software` everywhere — on your machine when you regenerate them, and in
+  CI when you check them. Goldens made on a GPU and checked under llvmpipe will fail, and
+  the diff will look like noise.
+
+  ```
+  waypuppet run --software --size 1280x800 --scale 1 -- ./my-app
+  ```
+
+  `--software` is a filter, not a preference: a machine with no llvmpipe fails to start
+  rather than quietly falling back to the GPU, because a silent fallback is exactly the
+  thing that would make every golden wrong without anyone noticing. It applies to `run` and
+  `serve`, and `run --detach` forwards it to the session it starts.
 - **Pin your fonts.** waypuppet does not draw your text; your toolkit does, with whatever
   fonts the container has. Install them explicitly rather than inheriting them.
 - **Compare with a tolerance.** Exact equality is achievable within one renderer but brittle
