@@ -19,8 +19,8 @@ use smithay::{
         input::{Axis, AxisSource, ButtonState, KeyState},
         renderer::utils::on_commit_buffer_handler,
     },
-    delegate_compositor, delegate_dmabuf, delegate_output, delegate_seat, delegate_shm,
-    delegate_xdg_shell,
+    delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_output, delegate_seat,
+    delegate_shm, delegate_xdg_shell,
     desktop::{Space, Window},
     input::{
         Seat, SeatHandler, SeatState,
@@ -44,6 +44,12 @@ use smithay::{
         },
         dmabuf::{DmabufFeedbackBuilder, DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier},
         output::{OutputHandler, OutputManagerState},
+        selection::{
+            SelectionHandler,
+            data_device::{
+                ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
+            },
+        },
         shell::xdg::{
             PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
             XdgToplevelSurfaceData,
@@ -195,6 +201,12 @@ pub struct State {
     pub xdg_shell_state: XdgShellState,
     /// `wl_output` plus `xdg_output`.
     pub output_manager_state: OutputManagerState,
+    /// `wl_data_device_manager`. Nothing here reads or writes a selection yet —
+    /// that is [plan 06] — but the global has to exist, because GTK will not
+    /// create a seat at all without one, and a seat is where input arrives.
+    ///
+    /// [plan 06]: https://github.com/moosingin3space/waypuppet/blob/main/plans/06-clipboard-and-resize.md
+    pub data_device_state: DataDeviceState,
     /// Seat bookkeeping. Input injection goes through the seat below.
     pub seat_state: SeatState<Self>,
 
@@ -253,6 +265,7 @@ impl State {
         let shm_state = ShmState::new::<Self>(&display_handle, Vec::new());
         let xdg_shell_state = XdgShellState::new::<Self>(&display_handle);
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&display_handle);
+        let data_device_state = DataDeviceState::new::<Self>(&display_handle);
         let mut seat_state = SeatState::new();
 
         let mut seat = seat_state.new_wl_seat(&display_handle, "waypuppet");
@@ -328,6 +341,7 @@ impl State {
             shm_state,
             xdg_shell_state,
             output_manager_state,
+            data_device_state,
             seat_state,
             seat,
             output,
@@ -990,6 +1004,23 @@ impl SeatHandler for State {
     }
 }
 
+impl SelectionHandler for State {
+    // No server-side selection is ever set, so nothing needs attaching to one.
+    type SelectionUserData = ();
+}
+
+// Drag and drop between clients cannot happen in a session with one client, and
+// waypuppet never starts a drag itself, so every event in these two traits is
+// unreachable here. The defaults are correct rather than merely convenient.
+impl ClientDndGrabHandler for State {}
+impl ServerDndGrabHandler for State {}
+
+impl DataDeviceHandler for State {
+    fn data_device_state(&self) -> &DataDeviceState {
+        &self.data_device_state
+    }
+}
+
 impl OutputHandler for State {}
 
 impl XdgShellHandler for State {
@@ -1059,6 +1090,7 @@ impl XdgShellHandler for State {
 }
 
 delegate_compositor!(State);
+delegate_data_device!(State);
 delegate_dmabuf!(State);
 delegate_shm!(State);
 delegate_seat!(State);

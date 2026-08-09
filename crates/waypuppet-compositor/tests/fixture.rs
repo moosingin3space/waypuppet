@@ -770,7 +770,11 @@ impl Client {
         // A missing global is the difference between "the app is slow" and "the
         // app hangs forever with no error", so check rather than assume.
         globals.contents().with_list(|list| {
-            for interface in ["wl_seat", "wl_output"] {
+            // `wl_data_device_manager` is here because GTK will not create a
+            // seat without one, and refuses silently: no seat means no
+            // keyboard, and input goes nowhere with nothing in the log to say
+            // why. Nothing in waypuppet reads a selection yet.
+            for interface in ["wl_seat", "wl_output", "wl_data_device_manager"] {
                 assert!(
                     list.iter().any(|global| global.interface == interface),
                     "{interface} is not advertised",
