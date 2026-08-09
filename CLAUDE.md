@@ -251,12 +251,20 @@ just build
 just test
 just cli ARGS     # run the binary: `just cli shot -o /tmp/o.png`. No `--`.
 just shell        # interactive shell in the SDK, toolchain active
+just ci           # what CI runs, in the image CI runs it in. Needs podman or docker.
+just toolkit      # drive a real GTK app under waypuppet, in that image.
 ```
 
-Every recipe builds inside the Flatpak SDK — see [Toolchain](#toolchain). For anything
-ad-hoc, including a single test, use `just shell` and run cargo in there. Bare `cargo`
-outside the sandbox is unsupported: whether it links depends on what a given machine has
-installed, which is exactly the variable the SDK exists to remove.
+Every recipe builds inside the Flatpak SDK — see [Toolchain](#toolchain), and note the two
+exceptions: `just ci` and `just toolkit` use the *CI image* instead, which is a different
+container with the same libraries. For anything ad-hoc, including a single test, use `just
+shell` and run cargo in there. Bare `cargo` outside either container is unsupported:
+whether it links depends on what a given machine has installed, which is exactly the
+variable both images exist to remove.
+
+The Flatpak path is the inner loop; `just ci` is how to find out whether CI will agree
+without pushing to find out. They differ deliberately — CI has no render node, and
+[`docs/project-ci.md`](docs/project-ci.md) explains what that costs.
 
 ## Toolchain
 
