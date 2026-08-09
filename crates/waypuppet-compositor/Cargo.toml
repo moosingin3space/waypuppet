@@ -50,3 +50,7 @@ path = "tests/stall.rs"
 [[test]]
 name = "input"
 path = "tests/input.rs"
+
+[[test]]
+name = "dmabuf"
+path = "tests/dmabuf.rs"

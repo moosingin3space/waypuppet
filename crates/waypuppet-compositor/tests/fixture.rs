@@ -43,7 +43,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-use smithay::input::keyboard::xkb;
+use smithay::{
+    backend::allocator::{
+        Allocator as _, Buffer as _, Fourcc, Modifier,
+        dmabuf::AsDmabuf as _,
+        gbm::{GbmAllocator, GbmBuffer, GbmBufferFlags, GbmDevice},
+    },
+    input::keyboard::xkb,
+};
 use tokio::sync::oneshot;
 use wayland_client::{
     Connection, Dispatch, EventQueue, QueueHandle,
@@ -60,10 +67,16 @@ use wayland_client::{
         wl_surface::WlSurface,
     },
 };
-use wayland_protocols::xdg::shell::client::{
-    xdg_surface::{self, XdgSurface},
-    xdg_toplevel::{self, XdgToplevel},
-    xdg_wm_base::{self, XdgWmBase},
+use wayland_protocols::{
+    wp::linux_dmabuf::zv1::client::{
+        zwp_linux_buffer_params_v1::{self, ZwpLinuxBufferParamsV1},
+        zwp_linux_dmabuf_v1::{self, ZwpLinuxDmabufV1},
+    },
+    xdg::shell::client::{
+        xdg_surface::{self, XdgSurface},
+        xdg_toplevel::{self, XdgToplevel},
+        xdg_wm_base::{self, XdgWmBase},
+    },
 };
 use waypuppet_compositor::{Command, Compositor, Config, Frame, State};
 use waypuppet_proto::{Failure, Size};
@@ -360,6 +373,28 @@ impl Harness {
         self.await_reply(client, "the client to paint");
     }
 
+    /// The same, but through `zwp_linux_dmabuf_v1` rather than `wl_shm`.
+    ///
+    /// `Err` means the *client* could not get as far as handing a buffer over:
+    /// no render node it may open, no advertised format it can use, or a gbm
+    /// buffer it cannot map. Those are facts about the machine.
+    ///
+    /// Everything after the buffer is handed over is waypuppet's problem, and
+    /// panics rather than returning here — a compositor that rejects the import
+    /// must not be reportable as "this machine cannot do dmabuf".
+    ///
+    /// # Panics
+    ///
+    /// Panics if the compositor refuses the buffer, or if the client does not
+    /// answer within [`WAIT_LIMIT`].
+    pub fn paint_dmabuf(&mut self, client: &mut ClientThread, rgba: [u8; 4]) -> Result<(), String> {
+        client.send(ClientCommand::PaintDmabuf(rgba));
+        match self.await_reply(client, "the client to paint through dmabuf") {
+            Reply::Painted(result) => result,
+            other => panic!("expected a dmabuf paint, got {other:?}"),
+        }
+    }
+
     /// Hand back the input the client has received since the last call.
     ///
     /// # Panics
@@ -495,8 +530,10 @@ impl ClientThread {
 enum ClientCommand {
     /// Block until configured, and report the size.
     Configure,
-    /// Fill the window and commit.
+    /// Fill the window and commit, through `wl_shm`.
     Paint([u8; 4]),
+    /// The same, through `zwp_linux_dmabuf_v1`.
+    PaintDmabuf([u8; 4]),
     /// Report the input received since the last drain.
     Drain,
     /// Disconnect and finish.
@@ -512,6 +549,8 @@ enum Reply {
     Configured(i32, i32),
     /// Everything received since the last drain.
     Input(Vec<Input>),
+    /// A dmabuf paint was attempted, and either worked or could not be set up.
+    Painted(Result<(), String>),
     /// The last command finished.
     Done,
 }
@@ -539,6 +578,7 @@ fn client_thread(
                 client.paint(size, rgba);
                 Reply::Done
             }
+            ClientCommand::PaintDmabuf(rgba) => Reply::Painted(client.paint_dmabuf(size, rgba)),
             ClientCommand::Drain => Reply::Input(client.drain()),
             ClientCommand::Stop => {
                 let _ = replies.send(Reply::Done);
@@ -567,9 +607,25 @@ struct Client {
     /// Held so the compositor keeps sending to them.
     _keyboard: WlKeyboard,
     _pointer: WlPointer,
+    /// The dmabuf global, bound at version 3 so the format and modifier events
+    /// arrive — which is also how this fixture learns what the compositor will
+    /// accept, rather than guessing. `None` if it was never advertised.
+    dmabuf: Option<ZwpLinuxDmabufV1>,
     /// Held so the buffer outlives the commit that referenced it.
     buffer: Option<(WlShmPool, WlBuffer)>,
+    /// The same, for a dmabuf paint. The gbm buffer has to outlive the commit
+    /// too, or the compositor is compositing freed memory.
+    imported: Option<(Allocated, WlBuffer)>,
     events: Events,
+}
+
+/// A gbm buffer object and the allocator that owns its device.
+///
+/// Kept together because dropping the device invalidates the buffer, and the
+/// buffer has to survive as long as the compositor might read it.
+struct Allocated {
+    _allocator: GbmAllocator<std::fs::File>,
+    _buffer: GbmBuffer,
 }
 
 /// What the client has learned from the compositor.
@@ -585,6 +641,8 @@ struct Events {
     xkb: Option<xkb::State>,
     /// Input received since the last drain.
     input: Vec<Input>,
+    /// The dmabuf format and modifier pairs the compositor advertised.
+    dmabuf_formats: Vec<(u32, Modifier)>,
 }
 
 impl Events {
@@ -619,6 +677,24 @@ impl Events {
         self.xkb = Some(xkb::State::new(&keymap));
     }
 
+    /// Choose a modifier the compositor advertised for `format`.
+    ///
+    /// `Linear` first, because this fixture writes the pixels from the CPU and
+    /// a tiled buffer would come out scrambled. `Invalid` — "whatever the
+    /// driver picks" — is the fallback for a compositor that only advertises
+    /// the implicit modifier.
+    fn pick_modifier(&self, format: Fourcc) -> Option<Modifier> {
+        let code = format as u32;
+        let offered = |wanted: Modifier| {
+            self.dmabuf_formats
+                .iter()
+                .any(|&(advertised, modifier)| advertised == code && modifier == wanted)
+        };
+        [Modifier::Linear, Modifier::Invalid]
+            .into_iter()
+            .find(|&modifier| offered(modifier))
+    }
+
     /// Name the keysym a keycode produces under the current modifiers.
     fn name(&self, evdev: u32) -> String {
         let state = self.xkb.as_ref().expect("a keymap arrived before any key");
@@ -646,6 +722,14 @@ impl Client {
         // Version 8 or better, so discrete scrolls arrive as `v120` steps
         // rather than only as accumulated values.
         let seat: WlSeat = globals.bind(&handle, 8..=9, ()).expect("wl_seat");
+        // Version 3 exactly: it is the last version that announces formats up
+        // front, and this fixture wants to be told what the compositor accepts
+        // rather than assume. A real toolkit would use version 4 feedback.
+        //
+        // Optional, because a session whose EGL is unusable still serves the
+        // protocol and still runs most of these tests. Only `paint_dmabuf`
+        // needs it, and it says so when it is missing.
+        let dmabuf: Option<ZwpLinuxDmabufV1> = globals.bind(&handle, 3..=3, ()).ok();
 
         // A missing global is the difference between "the app is slow" and "the
         // app hangs forever with no error", so check rather than assume.
@@ -681,7 +765,9 @@ impl Client {
             _toplevel: toplevel,
             _keyboard: keyboard,
             _pointer: pointer,
+            dmabuf,
             buffer: None,
+            imported: None,
             events: Events::default(),
         }
     }
@@ -716,6 +802,89 @@ impl Client {
             .expect("the loop only exits once this is set")
     }
 
+    /// Fill the window with one colour and commit it, through a dmabuf.
+    ///
+    /// This is the path a real toolkit takes: allocate on a render node with
+    /// gbm, export the buffer object as a dmabuf, hand the file descriptors to
+    /// the compositor over `zwp_linux_dmabuf_v1`, and attach what comes back.
+    /// `wl_shm` proves none of it.
+    fn paint_dmabuf(&mut self, (width, height): (i32, i32), rgba: [u8; 4]) -> Result<(), String> {
+        let global = self
+            .dmabuf
+            .clone()
+            .ok_or_else(|| "the compositor does not advertise zwp_linux_dmabuf_v1".to_owned())?;
+
+        // The compositor told us what it accepts when we bound the global; a
+        // format it did not name would be rejected, and rightly.
+        let modifier = self
+            .events
+            .pick_modifier(Fourcc::Argb8888)
+            .ok_or_else(|| "the compositor advertises no Argb8888 dmabuf format".to_owned())?;
+
+        let (allocator, mut buffer) = allocate(width, height, modifier)?;
+        fill(&mut buffer, rgba)?;
+        let dmabuf = buffer
+            .export()
+            .map_err(|error| format!("the buffer cannot be exported as a dmabuf: {error}"))?;
+
+        let params = global.create_params(&self.handle, ());
+        let format = dmabuf.format();
+        let raw = u64::from(format.modifier);
+        for (index, ((fd, offset), stride)) in dmabuf
+            .handles()
+            .zip(dmabuf.offsets())
+            .zip(dmabuf.strides())
+            .enumerate()
+        {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "a plane index above u32::MAX is not a thing"
+            )]
+            params.add(
+                fd,
+                index as u32,
+                offset,
+                stride,
+                (raw >> 32) as u32,
+                (raw & 0xFFFF_FFFF) as u32,
+            );
+        }
+
+        // `create_immed` rather than `create`: the reply is the buffer, so
+        // there is nothing to dispatch for, and a compositor that refuses the
+        // import says so as a protocol error rather than an event this fixture
+        // would have to wait on.
+        let wl_buffer = params.create_immed(
+            width,
+            height,
+            format.code as u32,
+            zwp_linux_buffer_params_v1::Flags::empty(),
+            &self.handle,
+            (),
+        );
+
+        self.surface.attach(Some(&wl_buffer), 0, 0);
+        self.surface.damage(0, 0, width, height);
+        self.surface.commit();
+        self.imported = Some((
+            Allocated {
+                _allocator: allocator,
+                _buffer: buffer,
+            },
+            wl_buffer,
+        ));
+
+        // Deliberately a panic, not an `Err`. Past this point the client has
+        // done everything asked of it, so a protocol error here is the
+        // compositor refusing the import — and returning it alongside the
+        // "this machine cannot allocate" cases would let a real defect be
+        // reported as an environment limitation and skipped.
+        self.connection
+            .roundtrip()
+            .expect("the compositor accepted the dmabuf it advertised a format for");
+        Ok(())
+    }
+
     /// Fill the window with one colour and commit it.
     fn paint(&mut self, (width, height): (i32, i32), rgba: [u8; 4]) {
         let (pool, buffer) = shm_buffer(&self.shm, &self.handle, width, height, rgba);
@@ -728,6 +897,88 @@ impl Client {
             .roundtrip()
             .expect("the commit did not provoke a protocol error");
     }
+}
+
+/// Allocate a linear gbm buffer on the first render node we may open.
+///
+/// A render node rather than a card node: card nodes want privileges a
+/// container usually does not have, and a client has no business holding them.
+fn allocate(
+    width: i32,
+    height: i32,
+    modifier: Modifier,
+) -> Result<(GbmAllocator<std::fs::File>, GbmBuffer), String> {
+    let mut tried = Vec::new();
+    let nodes = std::fs::read_dir("/dev/dri")
+        .map_err(|error| format!("/dev/dri is not readable: {error}"))?;
+
+    for entry in nodes.flatten() {
+        let path = entry.path();
+        if !path
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with("renderD"))
+        {
+            continue;
+        }
+
+        let opened = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .map_err(|error| error.to_string())
+            .and_then(|file| GbmDevice::new(file).map_err(|error| error.to_string()));
+        let device = match opened {
+            Ok(device) => device,
+            Err(error) => {
+                tried.push(format!("{}: {error}", path.display()));
+                continue;
+            }
+        };
+
+        // `LINEAR` so the buffer can be mapped and written from the CPU, which
+        // is the only way this fixture can put a known colour in it. A real
+        // toolkit would render into it on the GPU and not care.
+        let mut allocator =
+            GbmAllocator::new(device, GbmBufferFlags::RENDERING | GbmBufferFlags::LINEAR);
+        match allocator.create_buffer(
+            width.unsigned_abs(),
+            height.unsigned_abs(),
+            Fourcc::Argb8888,
+            &[modifier],
+        ) {
+            Ok(buffer) => return Ok((allocator, buffer)),
+            Err(error) => tried.push(format!("{}: {error}", path.display())),
+        }
+    }
+
+    Err(if tried.is_empty() {
+        "no render node in /dev/dri".to_owned()
+    } else {
+        tried.join("; ")
+    })
+}
+
+/// Fill a mapped gbm buffer with one colour.
+fn fill(buffer: &mut GbmBuffer, rgba: [u8; 4]) -> Result<(), String> {
+    // `Argb8888` is 0xAARRGGBB in a little-endian word, so the bytes run
+    // B, G, R, A — the same trap as the `wl_shm` path below.
+    let [r, g, b, a] = rgba;
+    let pixel = [b, g, r, a];
+    let (width, height) = (buffer.width(), buffer.height());
+
+    buffer
+        .map_mut(0, 0, width, height, |mapping| {
+            let stride = mapping.stride() as usize;
+            let row = width as usize * 4;
+            let pixels = mapping.buffer_mut();
+            for y in 0..height as usize {
+                let start = y * stride;
+                for chunk in pixels[start..start + row].chunks_exact_mut(4) {
+                    chunk.copy_from_slice(&pixel);
+                }
+            }
+        })
+        .map_err(|error| format!("the gbm buffer cannot be mapped for writing: {error}"))
 }
 
 /// A pool and buffer of `width` × `height`, filled with `rgba`.
@@ -830,6 +1081,50 @@ impl Dispatch<XdgToplevel, ()> for Events {
         if let xdg_toplevel::Event::Configure { width, height, .. } = event {
             state.configured = Some((width, height));
         }
+    }
+}
+
+impl Dispatch<ZwpLinuxDmabufV1, ()> for Events {
+    fn event(
+        state: &mut Self,
+        _dmabuf: &ZwpLinuxDmabufV1,
+        event: zwp_linux_dmabuf_v1::Event,
+        _data: &(),
+        _connection: &Connection,
+        _handle: &QueueHandle<Self>,
+    ) {
+        // The version 3 `modifier` event supersedes the version 1 `format`
+        // event; both are recorded, because a compositor that only sent the
+        // older one still means what it says.
+        match event {
+            zwp_linux_dmabuf_v1::Event::Modifier {
+                format,
+                modifier_hi,
+                modifier_lo,
+            } => {
+                let raw = (u64::from(modifier_hi) << 32) | u64::from(modifier_lo);
+                state.dmabuf_formats.push((format, Modifier::from(raw)));
+            }
+            zwp_linux_dmabuf_v1::Event::Format { format } => {
+                state.dmabuf_formats.push((format, Modifier::Invalid));
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<ZwpLinuxBufferParamsV1, ()> for Events {
+    fn event(
+        _state: &mut Self,
+        _params: &ZwpLinuxBufferParamsV1,
+        _event: zwp_linux_buffer_params_v1::Event,
+        _data: &(),
+        _connection: &Connection,
+        _handle: &QueueHandle<Self>,
+    ) {
+        // `created` and `failed` only arrive for the deferred `create` request.
+        // This fixture uses `create_immed`, where a refusal is a protocol error
+        // rather than an event.
     }
 }
 
