@@ -66,6 +66,29 @@ pub enum Error {
     Unimplemented(&'static str),
 }
 
+/// Which device a session renders on.
+///
+/// The choice affects pixels, not just speed: llvmpipe and a GPU driver
+/// antialias and filter differently, so a capture taken under one will not be
+/// byte-identical to the same capture under the other. That is why this is a
+/// deliberate setting rather than "whatever is fastest" — golden images are
+/// only comparable against captures from the same renderer, and CI is almost
+/// always software.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Rendering {
+    /// The fastest device available: hardware where there is any, software
+    /// otherwise.
+    #[default]
+    Fastest,
+    /// Software only, even where a GPU exists.
+    ///
+    /// The setting golden-image testing needs: it makes a developer machine
+    /// rasterise the way a runner with no render node will.
+    Software,
+    /// One named DRM node.
+    Device(PathBuf),
+}
+
 /// How a session is set up.
 ///
 /// Everything here is fixed for the session's lifetime, and that is the point:
@@ -78,9 +101,8 @@ pub struct Config {
     /// The output's scale factor, reported to clients via `wl_output` and
     /// `wp_fractional_scale`.
     pub scale: f64,
-    /// Which DRM render node to render on. `None` picks the first device that
-    /// [`probe`] reports, preferring hardware over software.
-    pub render_node: Option<PathBuf>,
+    /// Which device to render on.
+    pub rendering: Rendering,
     /// Where captures land when a request does not name a path.
     pub capture_dir: PathBuf,
 }
@@ -93,7 +115,7 @@ impl Default for Config {
                 height: 800,
             },
             scale: 1.0,
-            render_node: None,
+            rendering: Rendering::default(),
             capture_dir: std::env::temp_dir(),
         }
     }

@@ -30,7 +30,7 @@ use smithay::{
     utils::{Buffer as BufferCoords, Rectangle, Size},
 };
 
-use crate::{Error, RenderDevice};
+use crate::{Error, RenderDevice, Rendering};
 
 /// A device EGL knows about, paired with what we can say about it publicly.
 struct Candidate {
@@ -93,6 +93,8 @@ pub struct Renderer {
     /// The render node this renderer is on, when it has one. Software devices
     /// do not, which is why it is optional rather than assumed.
     node: Option<DrmNode>,
+    /// Whether this is llvmpipe rather than a GPU.
+    software: bool,
     /// Kept alive because the context borrows it. Dropping it early tears the
     /// context out from under the renderer.
     _display: EGLDisplay,
@@ -109,19 +111,16 @@ impl Renderer {
     /// # Errors
     ///
     /// Returns [`Error::NoRenderDevice`] if every candidate fails.
-    pub fn new(output: &Output, preferred: Option<&Path>) -> Result<Self, Error> {
-        let candidates = select(preferred)?;
+    pub fn new(output: &Output, rendering: &Rendering) -> Result<Self, Error> {
+        let candidates = select(rendering)?;
         if candidates.is_empty() {
-            return Err(Error::NoRenderDevice(
-                "EGL reported no devices; the container is probably missing --device=dri"
-                    .to_owned(),
-            ));
+            return Err(Error::NoRenderDevice(nothing_matched(rendering)));
         }
 
         let mut failures = Vec::new();
         for candidate in candidates {
             let info = candidate.info.clone();
-            match Self::on_device(candidate.egl, output) {
+            match Self::on_device(candidate.egl, output, info.software) {
                 Ok(renderer) => {
                     tracing::info!(
                         path = ?info.path,
@@ -140,7 +139,7 @@ impl Renderer {
     }
 
     /// Build a renderer on one specific device.
-    fn on_device(device: EGLDevice, output: &Output) -> Result<Self, Error> {
+    fn on_device(device: EGLDevice, output: &Output, software: bool) -> Result<Self, Error> {
         // Read before the device is consumed below. A software device has no
         // node, which is not an error — it only means there is nothing to name
         // in dmabuf feedback.
@@ -169,8 +168,19 @@ impl Renderer {
             gles,
             damage: OutputDamageTracker::from_output(output),
             node,
+            software,
             _display: display,
         })
+    }
+
+    /// Whether this renderer is llvmpipe rather than a GPU.
+    ///
+    /// Exposed because "did `--software` actually take effect?" is otherwise
+    /// unanswerable from outside, and a silent fallback to hardware would make
+    /// every golden image wrong in a way nobody notices.
+    #[must_use]
+    pub fn is_software(&self) -> bool {
+        self.software
     }
 
     /// The dmabuf formats this renderer can import.
@@ -286,9 +296,7 @@ impl Renderer {
 }
 
 /// Rendering devices worth trying, best first.
-///
-/// Hardware before software, and if `preferred` is given, only that device.
-fn select(preferred: Option<&Path>) -> Result<Vec<Candidate>, Error> {
+fn select(rendering: &Rendering) -> Result<Vec<Candidate>, Error> {
     let mut devices: Vec<Candidate> = EGLDevice::enumerate()?
         .map(|egl| Candidate {
             info: RenderDevice {
@@ -299,13 +307,37 @@ fn select(preferred: Option<&Path>) -> Result<Vec<Candidate>, Error> {
         })
         .collect();
 
-    if let Some(wanted) = preferred {
-        devices.retain(|device| device.info.path.as_deref() == Some(wanted));
-        return Ok(devices);
+    match rendering {
+        Rendering::Device(wanted) => {
+            devices.retain(|device| device.info.path.as_deref() == Some(wanted.as_path()));
+        }
+        // A filter rather than a preference: falling back to the GPU would
+        // defeat the point, which is to rasterise the way a machine without one
+        // does. Failing loudly is the only useful answer.
+        Rendering::Software => devices.retain(|device| device.info.software),
+        // Software works and is often all a container is given, but it is
+        // several times slower, so it is the fallback rather than the default.
+        Rendering::Fastest => devices.sort_by_key(|device| device.info.software),
     }
-
-    // Software rendering works and is often all a container is given, but it is
-    // several times slower, so it is the fallback rather than the default.
-    devices.sort_by_key(|device| device.info.software);
     Ok(devices)
+}
+
+/// Why nothing was left to try, in terms of what was asked for.
+///
+/// The three cases have completely different fixes, and "no render device" on
+/// its own sends everyone to the same wrong place.
+fn nothing_matched(rendering: &Rendering) -> String {
+    match rendering {
+        Rendering::Fastest => {
+            "EGL reported no devices; the container is probably missing --device=dri".to_owned()
+        }
+        Rendering::Software => {
+            "no software EGL device: --software was asked for, and this EGL has no \
+             llvmpipe or swrast driver installed"
+                .to_owned()
+        }
+        Rendering::Device(path) => {
+            format!("EGL knows of no device at {}", path.display())
+        }
+    }
 }

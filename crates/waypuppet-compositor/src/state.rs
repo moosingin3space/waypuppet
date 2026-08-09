@@ -307,8 +307,8 @@ impl State {
         // Brought up here rather than on first capture: the dmabuf global
         // advertises this renderer's formats, and a global that appears after
         // the client has already looked at the registry may as well not exist.
-        let mut renderer = Renderer::new(&output, config.render_node.as_deref())
-            .map_err(|error| error.to_string());
+        let mut renderer =
+            Renderer::new(&output, &config.rendering).map_err(|error| error.to_string());
         if let Err(why) = &renderer {
             tracing::warn!(
                 %why,
@@ -365,6 +365,12 @@ impl State {
             compositor_state: CompositorClientState::default(),
             connections: Arc::clone(&self.connections),
         }
+    }
+
+    /// Whether the session is rendering in software, if it renders at all.
+    #[must_use]
+    pub fn renders_in_software(&self) -> Option<bool> {
+        self.renderer.as_ref().ok().map(Renderer::is_software)
     }
 
     /// Composite the current state and read it back.

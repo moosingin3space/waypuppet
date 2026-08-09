@@ -17,7 +17,7 @@ mod client;
 use std::{path::Path, path::PathBuf, process::ExitCode, time::Duration};
 
 use clap::{Parser, Subcommand};
-use waypuppet_compositor::session;
+use waypuppet_compositor::{Rendering, session};
 use waypuppet_proto::{Button, ClientState, Cursor, Point, Size, Target, WindowId};
 
 /// Run a GUI application inside a headless compositor, then look at it and
@@ -64,6 +64,14 @@ enum Command {
         /// Output scale factor.
         #[arg(long, default_value_t = 1.0)]
         scale: f64,
+        /// Render with llvmpipe even where a GPU is available.
+        ///
+        /// Pixels differ between software and hardware rasterisation, so a
+        /// golden image is only comparable against a capture from the same
+        /// renderer. CI has no render node, so this is how a developer machine
+        /// is made to match it.
+        #[arg(long)]
+        software: bool,
         /// Leave the session running in the background and return immediately.
         #[arg(long)]
         detach: bool,
@@ -110,6 +118,9 @@ enum Command {
         /// Output scale factor.
         #[arg(long, default_value_t = 1.0)]
         scale: f64,
+        /// Render with llvmpipe even where a GPU is available.
+        #[arg(long)]
+        software: bool,
         /// Exit when the spawned command does.
         #[arg(long)]
         exit_with_child: bool,
@@ -247,15 +258,17 @@ async fn dispatch(cli: Cli) -> ExitCode {
         Command::Serve {
             size,
             scale,
+            software,
             exit_with_child,
             argv,
-        } => serve(&socket, &size, scale, &argv, exit_with_child).await,
+        } => serve(&socket, &size, scale, software, &argv, exit_with_child).await,
         Command::Run {
             size,
             scale,
+            software,
             detach,
             argv,
-        } => run(&cli.session, &socket, &size, scale, &argv, detach).await,
+        } => run(&cli.session, &socket, &size, scale, software, &argv, detach).await,
         Command::Ps => ps(&socket, cli.json).await,
         Command::Shot { window, output } => shot(&socket, window, output, cli.json).await,
         Command::Logs { follow } => logs(&socket, follow).await,
@@ -287,10 +300,11 @@ async fn serve(
     socket: &Path,
     size: &str,
     scale: f64,
+    software: bool,
     argv: &[String],
     exit_with_child: bool,
 ) -> Result<ExitCode, String> {
-    let config = config(size, scale)?;
+    let config = config(size, scale, software)?;
     let exit = session::serve(&config, socket, argv, exit_with_child)
         .await
         .map_err(|error| error.to_string())?;
@@ -308,11 +322,12 @@ async fn run(
     socket: &Path,
     size: &str,
     scale: f64,
+    software: bool,
     argv: &[String],
     detach: bool,
 ) -> Result<ExitCode, String> {
     if !detach {
-        return serve(socket, size, scale, argv, true).await;
+        return serve(socket, size, scale, software, argv, true).await;
     }
 
     // Detaching re-executes this binary as a session, rather than forking, so
@@ -328,6 +343,12 @@ async fn run(
         .arg("--scale")
         .arg(scale.to_string())
         .stdin(std::process::Stdio::null());
+    // Forwarded, or a detached session would quietly render on the GPU while
+    // the foreground one rendered on llvmpipe — the two producing different
+    // pixels is the whole reason the flag exists.
+    if software {
+        command.arg("--software");
+    }
     if !argv.is_empty() {
         command.arg("--").args(argv);
     }
@@ -651,12 +672,17 @@ fn doctor(json: bool) -> ExitCode {
 }
 
 /// Build a session config from the command line.
-fn config(size: &str, scale: f64) -> Result<waypuppet_compositor::Config, String> {
+fn config(size: &str, scale: f64, software: bool) -> Result<waypuppet_compositor::Config, String> {
     let output =
         parse_size(size).ok_or_else(|| format!("--size wants WIDTHxHEIGHT, got {size:?}"))?;
     Ok(waypuppet_compositor::Config {
         output,
         scale,
+        rendering: if software {
+            Rendering::Software
+        } else {
+            Rendering::Fastest
+        },
         ..waypuppet_compositor::Config::default()
     })
 }

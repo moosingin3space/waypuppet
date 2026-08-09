@@ -78,7 +78,7 @@ use wayland_protocols::{
         xdg_wm_base::{self, XdgWmBase},
     },
 };
-use waypuppet_compositor::{Command, Compositor, Config, Frame, State};
+use waypuppet_compositor::{Command, Compositor, Config, Frame, Rendering, State};
 use waypuppet_proto::{Failure, Size};
 
 /// How long any single harness wait may take before it fails with a diagnosis.
@@ -214,6 +214,24 @@ pub fn guarded<F>(name: &'static str, output: Size, body: F)
 where
     F: FnOnce(&mut Harness) + Send + 'static,
 {
+    guarded_on(name, output, Rendering::default(), body);
+}
+
+/// The same, on a named renderer.
+///
+/// Exists so the software path is exercised on purpose rather than assumed to
+/// work because the hardware path does. They are different drivers: llvmpipe
+/// and a GPU disagree about rasterisation, and can disagree about which dmabuf
+/// formats they will import.
+///
+/// # Panics
+///
+/// Propagates a panic from the body, so ordinary assertion failures behave
+/// normally.
+pub fn guarded_on<F>(name: &'static str, output: Size, rendering: Rendering, body: F)
+where
+    F: FnOnce(&mut Harness) + Send + 'static,
+{
     let watch = Watch::default();
     let (done_tx, done_rx) = mpsc::channel();
 
@@ -221,7 +239,7 @@ where
         let watch = watch.clone();
         move || {
             let _signal = Signal(done_tx);
-            let mut harness = Harness::new(output, watch);
+            let mut harness = Harness::new(output, rendering, watch);
             body(&mut harness);
         }
     });
@@ -259,9 +277,10 @@ impl Harness {
     ///
     /// Panics if the compositor cannot start, or if `XDG_RUNTIME_DIR` is unset.
     #[must_use]
-    pub fn new(output: Size, watch: Watch) -> Self {
+    pub fn new(output: Size, rendering: Rendering, watch: Watch) -> Self {
         let compositor = Compositor::new(&Config {
             output,
+            rendering,
             ..Config::default()
         })
         .expect("compositor starts");
@@ -282,6 +301,23 @@ impl Harness {
     #[must_use]
     pub fn state(&self) -> &State {
         self.compositor.state()
+    }
+
+    /// Whether the compositor is rendering in software.
+    ///
+    /// What makes a `Rendering::Software` test mean something: without it the
+    /// same body passes on a GPU, and the software path would be untested while
+    /// looking covered.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the session has no renderer at all.
+    #[must_use]
+    pub fn renders_in_software(&self) -> bool {
+        self.compositor
+            .state()
+            .renders_in_software()
+            .expect("the session has a renderer")
     }
 
     /// The bridge, for a test that wants to park a reply and keep going.
