@@ -41,6 +41,14 @@ from a fork, and a fresh checkout's first run would have nothing to pull. The bu
 cache recovers most of the speed and neither problem exists. Revisit if image build time
 ever dominates.
 
+That cache only pays off if the run step looks at the same image the build step produced,
+and it nearly did not. buildx loads into **docker**, while `ci/run.sh` prefers **podman** —
+right on a contributor's machine, wrong here, because podman cannot see a docker image and
+so rebuilt all sixteen layers from scratch before every job. The workflow sets
+`WAYPUPPET_CONTAINER_ENGINE: docker` to name the engine rather than let the two steps
+disagree. One consequence worth knowing: docker's daemon is root, so the container is root
+too, which is why the dmabuf step can open a device node that a rootless engine could not.
+
 ## No render node
 
 GitHub-hosted runners have no `/dev/dri`. waypuppet has to work anyway, which is why
