@@ -66,13 +66,20 @@ jobs:
       # Whether a hosted runner will load the module is the one link in this file that was
       # not verified locally. So: try, and if it is not there, say so loudly in the run
       # summary rather than reporting a green tick for something nobody tested.
+      # Existing is not the same as usable: the node is created root-owned and mode 0600,
+      # and `ci/run.sh` runs rootless, so the container opens it as an unprivileged user
+      # and gets EACCES. Loosening the mode is what makes the device reachable; the runner
+      # is a single-use VM, so widening a device there costs nothing. Both the module and
+      # the permission are checked by *opening* it, because that is the question the test
+      # actually asks.
       - name: dmabuf import
         run: |
           sudo modprobe udmabuf 2>/dev/null || true
-          if [ -e /dev/udmabuf ]; then
+          sudo chmod 0666 /dev/udmabuf 2>/dev/null || true
+          if [ -r /dev/udmabuf ] && [ -w /dev/udmabuf ]; then
             ci/run.sh cargo test --workspace --test dmabuf -- --include-ignored
           else
-            echo "::warning title=dmabuf untested::no /dev/udmabuf on this runner, so the dmabuf import path was not exercised; see docs/project-ci.md"
+            echo "::warning title=dmabuf untested::no usable /dev/udmabuf on this runner, so the dmabuf import path was not exercised; see docs/project-ci.md"
           fi
 
       # A runner has no render node, so this must report software and nothing else. If it

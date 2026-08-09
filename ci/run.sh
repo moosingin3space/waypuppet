@@ -8,9 +8,15 @@
 # does, so "it passes on my machine but not in CI" has one fewer place to hide. `just ci`
 # runs the whole set.
 #
-# Cargo's home and target directory are kept outside the checkout, under ci/.cache, so a
-# container run does not fight the Flatpak build for target/flatpak and neither one
+# Cargo's downloads and target directory are kept outside the checkout, under ci/.cache, so
+# a container run does not fight the Flatpak build for target/flatpak and neither one
 # invalidates the other.
+#
+# Note what is *not* done here: CARGO_HOME is left alone. mise installs rust with rustup
+# under $CARGO_HOME, and resolves the toolchain from that variable every time a shim runs —
+# so pointing CARGO_HOME at an empty cache directory does not relocate the toolchain, it
+# hides it, and every command fails as `No version is set for shim: cargo`. Only the two
+# directories cargo actually downloads into are mounted, which is what a cache wants anyway.
 set -eu
 
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
@@ -39,7 +45,7 @@ if ! "$engine" image exists "$image" >/dev/null 2>&1 &&
     "$engine" build -f "$root/ci/Containerfile" -t "$image" "$root" >&2
 fi
 
-mkdir -p "$cache/cargo" "$cache/target"
+mkdir -p "$cache/cargo/registry" "$cache/cargo/git" "$cache/target"
 
 # udmabuf(7), when the host has it. It turns a sealed memfd into a dma-buf with no GPU
 # involved, which is what lets `tests/dmabuf.rs` run its client half here — this image
@@ -59,9 +65,9 @@ fi
 exec "$engine" run --rm \
     $devices \
     --volume "$root:/workspace:Z" \
-    --volume "$cache/cargo:/cargo:Z" \
+    --volume "$cache/cargo/registry:/root/.cargo/registry:Z" \
+    --volume "$cache/cargo/git:/root/.cargo/git:Z" \
     --volume "$cache/target:/target:Z" \
-    --env CARGO_HOME=/cargo \
     --env CARGO_TARGET_DIR=/target \
     --workdir /workspace \
     "$image" "$@"
