@@ -25,6 +25,7 @@ pub mod a11y;
 pub mod bridge;
 pub mod input;
 mod render;
+pub mod select;
 pub mod session;
 mod state;
 

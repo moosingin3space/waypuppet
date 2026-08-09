@@ -266,6 +266,87 @@ pub struct Node {
     pub children: Vec<Node>,
 }
 
+/// One step of a selector [`Query`]: what a matched node has to be.
+///
+/// Matches a node's identity, never its geometry. Bounds are how a match is
+/// *clicked*, not what it is *selected by* — a node with no bounds is a failure
+/// at click time ([`Failure::MatchedNoBounds`]), not a non-match here. Starts
+/// minimal (exact role, exact name); the text grammar decision — regex, case,
+/// compound — is deferred and will extend `Predicate` rather than reshape it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Predicate {
+    /// The AT-SPI role, matched exactly — `button`, `list item`. `None` matches
+    /// any role.
+    pub role: Option<String>,
+    /// The accessible name, exact and case-sensitive. `None` matches any name,
+    /// including an absent one.
+    pub name: Option<String>,
+}
+
+/// A query against the accessibility tree — a descendant-axis path.
+///
+/// Each [`Predicate`] matches some node; each later one a descendant of the
+/// previous match; the last one's match is the target. A single-element path is
+/// a flat match anywhere in the tree — the common case — and more elements
+/// narrow by structure without insisting on a direct-child chain. The text
+/// grammar compiles down to this, and an LLM may emit it directly.
+///
+/// [`Query::index`] is how a caller disambiguates a many-match query: `None`
+/// requires a unique match and fails [`Failure::Ambiguous`] otherwise, while
+/// `Some(i)` takes the zero-based i-th candidate in document order — the order
+/// `waypuppet tree` prints, so an index selects the same node a human would
+/// count.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Query {
+    /// Root-to-target predicates. Non-empty; an empty path is
+    /// [`Failure::BadQuery`].
+    pub path: Vec<Predicate>,
+    /// Which match of the final predicate to take. `None` requires a unique
+    /// match; `Some(i)` takes the zero-based i-th in document order.
+    pub index: Option<usize>,
+}
+
+/// One node a selector matched, trimmed to what disambiguates it.
+///
+/// Carried by [`Failure::Ambiguous`] so a caller — or an agent — can see what
+/// matched and narrow the query. Not a full [`Node`]: the subtree under a match
+/// is noise when the job is telling two matches apart. The `path` is the
+/// *full* ancestor chain as [`Predicate`] steps, root to parent, so a caller
+/// can append this node's own role/name and write a [`Query`] that selects it
+/// alone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Match {
+    /// This node's actual role.
+    pub role: String,
+    /// This node's accessible name, if any.
+    pub name: Option<String>,
+    /// This node's bounds, if any. `None` here is a visible hint a caller can
+    /// filter against, rather than the silent failure a no-bounds match would
+    /// be at click time.
+    pub bounds: Option<Rect>,
+    /// The full ancestor chain as `Predicate` steps, root to parent. Empty for
+    /// a match at the root.
+    pub path: Vec<Predicate>,
+}
+
+/// Where an input verb should land.
+///
+/// Mutually exclusive by construction: a point and a tree query are different
+/// things a caller should not be able to ask for at once, so this is a type
+/// rather than a pair of `Option`s checked by hand — the same instinct that
+/// made [`Target`] an enum. `At` is what `--at X,Y` carries today; `On` is what
+/// `--on <selector>` carries, resolved to the matched node's centre before the
+/// event is dispatched.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Locator {
+    /// A specific point, as `--at X,Y` takes today.
+    At(Point),
+    /// A query against the tree, resolved to the matched node's centre before
+    /// the event is dispatched.
+    On(Query),
+}
+
 /// Why a call failed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 #[serde(rename_all = "snake_case")]
@@ -320,6 +401,35 @@ pub enum Failure {
     /// The accessibility tree could not be read.
     #[error("cannot read the accessibility tree: {0}")]
     Tree(String),
+    /// A selector query is malformed (e.g. an empty path). Reported by the CLI
+    /// parser where it can be; re-checked here so an LLM emitting the
+    /// [`Query`] structure directly — bypassing the parser — still gets one.
+    #[error("malformed selector: {0}")]
+    BadQuery(String),
+    /// A selector matched no node.
+    #[error("selector matched no node")]
+    NoMatch,
+    /// A selector matched several nodes where one was expected.
+    ///
+    /// Carries every match, trimmed to its disambiguating facts — role, name,
+    /// bounds, and the full ancestor path that locates it — so a caller or an
+    /// agent can see what was found and narrow the query. The count is
+    /// `matches.len()`; no silent cap, because truncating the list would hide
+    /// matches a caller needs to see, and a broad selector against a real tree
+    /// can match dozens honestly.
+    #[error("selector matched {count} nodes; disambiguate with an index")]
+    Ambiguous {
+        /// How many nodes matched. Redundant with `matches.len()` but kept for
+        /// the error message and for callers that want the count without the
+        /// detail.
+        count: usize,
+        /// Every match, trimmed to what disambiguates it.
+        matches: Vec<Match>,
+    },
+    /// A selector matched a node with no bounds — it is not laid out, so there
+    /// is nowhere to click.
+    #[error("selector matched a node with no bounds — it is not laid out")]
+    MatchedNoBounds,
     /// A selection could not be read or written.
     ///
     /// Transfers are fd-based and cooperative: the other side may offer a type
