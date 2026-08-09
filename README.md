@@ -124,10 +124,12 @@ everything it wrote — which is the failure this project was started over. Inpu
 `key`, `type`, `click`, `move`, `scroll` and `resize` deliver real events through the seat,
 and each one returns only once the client has drawn in response.
 
-**Not yet.** `wait`, the clipboard, and the accessibility tree. And
-`zwp_linux_dmabuf_v1`, which matters more than it sounds: anything Skia-backed renders
-through EGL and will not draw without it, so no real toolkit has been hosted yet. The
-transcript at the top of this file is the design, not a recording.
+Clients may draw through `wl_shm` or `zwp_linux_dmabuf_v1`, so anything Skia-backed —
+which renders through EGL — has somewhere to put its buffers.
+
+**Not yet.** `wait`, the clipboard, and the accessibility tree. No real toolkit has been
+hosted end to end yet, though nothing protocol-level is now known to be missing for one.
+The transcript at the top of this file is the design, not a recording.
 
 [CLAUDE.md] has the architecture, [plans/](plans/) has one file per phase with its status
 and what it taught us, and [docs/](docs/) covers using waypuppet in CI.

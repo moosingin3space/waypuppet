@@ -153,6 +153,18 @@ a starting position, `scroll` and a `click` with no coordinates have no pointer 
 to: the events vanish and the call fails as `NotSettled`, which blames the application for
 waypuppet's omission. The centre is arbitrary but fixed, which is what determinism needs.
 
+### The renderer exists from startup, because dmabuf needs its formats
+
+`State::renderer` is a `Result<Renderer, String>` built in `State::new`, not on first
+capture. `zwp_linux_dmabuf_v1` advertises *that renderer's* importable formats, and a
+global that appears after the client has read the registry may as well not exist — so the
+renderer has to be up before the child process connects.
+
+A session whose EGL is unusable still serves the whole protocol; it just reports that at
+startup instead of at the first `shot`, and offers no dmabuf global. `DmabufHandler::
+dmabuf_imported` imports each buffer and answers the `ImportNotifier` honestly, so a client
+finds out at the moment it asks rather than by getting a blank window.
+
 ### smithay features
 
 Default features are off; the selection and its reasoning live on
@@ -286,8 +298,11 @@ it ever mapped a window, and everything it wrote. Input works too — `key`, `ty
 `move`, `scroll` and `resize` deliver real events through the seat and return only once the
 client has drawn in response.
 
-Not yet: `wait`, the accessibility tree, and `zwp_linux_dmabuf_v1` — without which nothing
-that renders through EGL will draw, so no real toolkit has been hosted yet.
+Clients may draw through `wl_shm` or `zwp_linux_dmabuf_v1`, which is what a Skia-backed
+toolkit needs.
+
+Not yet: `wait` and the accessibility tree. No real toolkit has been hosted end to end
+yet, though nothing protocol-level is now known to be missing for one.
 
 **The roadmap lives in [`plans/`](plans/)** — one file per phase, in the order they should
 land, each with its own acceptance criteria and, once landed, what it taught us.

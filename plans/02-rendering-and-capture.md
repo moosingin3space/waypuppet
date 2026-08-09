@@ -1,6 +1,6 @@
 # 02 — Rendering and capture
 
-**Status:** in progress — the capture path works end to end; dmabuf is what remains
+**Status:** in progress — capture and dmabuf both work; a `--software` flag is what remains
 **Depends on:** [01](01-compositor-core.md)
 
 ## Goal
@@ -73,18 +73,53 @@ black. `tests/fixture.rs` is the shared `wl_shm` client both test binaries use.
 
 ## Still to do
 
-- **`zwp_linux_dmabuf_v1`.** Nothing renders through EGL against waypuppet yet, which means
-  no real toolkit will draw. This needs a gbm device and `DmabufState` advertising the
-  renderer's formats, and it is the gate on trying freya.
 - Explicitly exercise the software device, rather than trusting that the fallback works
-  because the hardware path does.
+  because the hardware path does. `tests/dmabuf.rs` runs against whatever device EGL
+  picks, which on a developer machine is the GPU — so nothing yet proves llvmpipe imports
+  a dmabuf, and CI is exactly where that would matter. Needs the `--software` flag below.
 - **A way to force software rendering.** `Config::render_node` can name a device, but
   nothing on the CLI forces llvmpipe where a GPU exists. Golden-image testing needs it —
   goldens have to be generated on the same renderer CI will use, and CI is almost always
   software. [`docs/ci.md`](../docs/ci.md) documents the practice and currently has to admit
   the flag is missing.
 
+## What dmabuf landed
+
+`Renderer` now exposes its importable formats, its render node and an `import_dmabuf`, and
+`State` advertises `zwp_linux_dmabuf_v1` from them — version 4 with default feedback where
+there is a node to name, version 3 otherwise. `DmabufHandler::dmabuf_imported` imports the
+buffer and answers the `ImportNotifier` with the result, so a client learns at the moment
+it asks rather than by getting a blank window. `bind_wl_display` is called alongside, which
+is what the `use_system_lib` feature was in the list for.
+
+`tests/dmabuf.rs` allocates a linear gbm buffer on a render node, writes a colour into it,
+exports it, hands the descriptors over the protocol, and asserts the capture shows that
+colour. A second test paints the same colour through both `wl_shm` and dmabuf and requires
+the two captures to be byte-identical, so a golden image is valid whichever kind of client
+produced it.
+
 ## What we learned
+
+- **The renderer had to stop being lazy.** It was built on first capture, so that a session
+  whose EGL is unusable still served the protocol. The dmabuf global advertises *the
+  renderer's* formats and has to exist before the client looks at the registry, so the
+  renderer now comes up in `State::new` and is held as `Result<Renderer, String>`. The
+  property that motivated the deferral survives — a session with no EGL still answers
+  everything but `shot` — and it now says so at startup rather than at the first capture.
+
+- **A test that skips can swallow the bug it was written for.** The first version of
+  `tests/dmabuf.rs` treated any failure from the client half as "this machine cannot
+  allocate" and returned early. Mutating `dmabuf_imported` to reject every buffer made the
+  compositor post a protocol error, the client's roundtrip failed, and the test *skipped* —
+  passing against a compositor that accepted nothing. The fixture now draws the line at the
+  moment the buffer is handed over: everything before it can be an environment failure,
+  everything after it is waypuppet's and panics. The test no longer skips at all, which is
+  right, because the rest of the suite already needs a rendering device.
+
+- **Only the test that needs the global should require it.** Binding
+  `zwp_linux_dmabuf_v1` unconditionally in the shared fixture coupled `handshake`,
+  `control` and `input` — none of which need to render — to EGL coming up. It is bound
+  optionally, and `paint_dmabuf` is the only thing that complains when it is missing.
 
 - **The `unsafe` exception is real, and it is one place.** `EGLDisplay::new` and
   `GlesRenderer::new` are both `unsafe fn`. The crate's `#![forbid(unsafe_code)]` had to

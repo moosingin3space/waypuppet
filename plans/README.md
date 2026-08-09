@@ -13,7 +13,7 @@ instead.
 | | Plan | Status |
 |---|---|---|
 | 01 | [Compositor core](01-compositor-core.md) — a client can connect and map a window | **done** |
-| 02 | [Rendering and capture](02-rendering-and-capture.md) — a frame becomes a PNG | in progress |
+| 02 | [Rendering and capture](02-rendering-and-capture.md) — a frame becomes a PNG | mostly done |
 | 03 | [Control socket](03-control-socket.md) — `run`, `ps`, `shot`, `logs`, `kill` | mostly done |
 | 04 | [Input](04-input.md) — `key`, `type`, `click`, `move`, `scroll` | **done** |
 | 05 | [Wait](05-wait.md) — block on protocol facts, not on sleeps | not started |
@@ -33,9 +33,11 @@ waiting on facts instead of sleeping, reusing the parked-sender machinery 04 bui
 needs 03, and it is what decides whether waypuppet is pleasant to reach for or a thing you
 have to remember how to set up.
 
-The one item that gates trying a real toolkit is not a phase of its own — it is
-`zwp_linux_dmabuf_v1`, in [02](02-rendering-and-capture.md)'s "Still to do". Nothing that
-renders through EGL will draw until it exists.
+`zwp_linux_dmabuf_v1` has landed, so a client that renders through EGL now has somewhere
+to put its buffers and a real toolkit can be tried. What is left in
+[02](02-rendering-and-capture.md)'s "Still to do" is a way to force software rendering,
+which golden-image testing needs and which also gates proving the dmabuf path on llvmpipe
+rather than only on a GPU.
 
 ## Not planned
 
