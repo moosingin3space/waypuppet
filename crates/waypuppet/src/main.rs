@@ -6,10 +6,10 @@
 //!
 //! # Status
 //!
-//! `doctor`, `serve`, `run`, `ps`, `shot`, `logs`, `kill`, `sessions` and every
-//! input verb — `key`, `type`, `click`, `move`, `scroll`, `resize` — work.
-//! `wait` and `tree` are declared and fail with a message pointing at `plans/`,
-//! so `--help` shows the whole designed surface rather than only the finished
+//! `doctor`, `serve`, `run`, `ps`, `shot`, `logs`, `kill`, `sessions`, `wait`
+//! and every input verb — `key`, `type`, `click`, `move`, `scroll`, `resize` —
+//! work. `tree` is declared and fails with a message pointing at `plans/`, so
+//! `--help` shows the whole designed surface rather than only the finished
 //! part — the shape is the thing being committed to.
 
 mod client;
@@ -18,7 +18,18 @@ use std::{path::Path, path::PathBuf, process::ExitCode, time::Duration};
 
 use clap::{Parser, Subcommand};
 use waypuppet_compositor::{Rendering, session};
-use waypuppet_proto::{Button, ClientState, Cursor, Point, Size, Target, WindowId};
+use waypuppet_proto::{Button, ClientState, Cursor, Point, Settled, Size, Target, WindowId};
+
+/// What `wait` exits with when its condition did not hold in time.
+///
+/// Distinct from the 1 every other failure uses, because it is not a failure:
+/// `waypuppet wait --exit; test $? -eq 3` is a caller asking "is it still
+/// running?" and getting a straight answer.
+///
+/// 3 rather than the obvious 2, which clap already spends on usage errors — a
+/// script cannot tell "the condition did not hold" from "you misspelled a flag"
+/// if both exit the same way.
+const TIMED_OUT: u8 = 3;
 
 /// Run a GUI application inside a headless compositor, then look at it and
 /// drive it.
@@ -182,23 +193,16 @@ enum Command {
     /// Block until something is true.
     ///
     /// Every condition is a protocol-level fact the session observed, which is
-    /// what makes this different from sleeping and hoping.
+    /// what makes this different from sleeping and hoping. Exactly one has to
+    /// be given.
+    ///
+    /// Exits 0 when the condition held and 3 when the timeout elapsed first.
+    /// Those are different answers: "it did not happen" is an outcome a script
+    /// may well be expecting, and it must not look like the 1 that means
+    /// waypuppet could not answer at all.
     Wait {
-        /// Wait until at least this many windows are mapped.
-        #[arg(long)]
-        windows: Option<usize>,
-        /// Wait until a window title matches this regular expression.
-        #[arg(long)]
-        title: Option<String>,
-        /// Wait until this many further frames have been committed.
-        #[arg(long)]
-        frames: Option<u32>,
-        /// Wait until no frame has been committed for this many milliseconds.
-        #[arg(long)]
-        idle: Option<u64>,
-        /// Wait until the client exits.
-        #[arg(long)]
-        exit: bool,
+        #[command(flatten)]
+        condition: WaitFor,
         /// Give up after this many milliseconds.
         #[arg(long, default_value_t = 5_000)]
         timeout: u64,
@@ -210,6 +214,74 @@ enum Command {
     /// pixels. Toolkits built on AccessKit — freya among them — publish one
     /// without being asked.
     Tree,
+}
+
+/// What `wait` blocks on.
+///
+/// A clap group rather than five independent options, so "exactly one" is
+/// enforced where the arguments are described instead of by a hand-written
+/// check that has to be kept in step with them.
+#[derive(Debug, clap::Args)]
+#[group(required = true, multiple = false)]
+struct WaitFor {
+    /// Wait until at least this many windows are mapped.
+    ///
+    /// The reliable one, and what to reach for after `run --detach`.
+    #[arg(long)]
+    windows: Option<usize>,
+    /// Wait until a mapped window's title matches this regular expression.
+    ///
+    /// The other reliable one. Anchor it — `^Files$` rather than `Files` — when
+    /// the application has more than one window.
+    #[arg(long)]
+    title: Option<String>,
+    /// Wait until the focused window has committed this many further frames.
+    ///
+    /// Frames arrive whether or not you caused them, so this means "it drew
+    /// again", not "the effect is visible". It fails immediately when no window
+    /// exists yet; --windows is what that case wants.
+    #[arg(long)]
+    frames: Option<u32>,
+    /// Wait until no client has committed a frame for this many milliseconds.
+    ///
+    /// A heuristic rather than a fact, and a trap for anything that repaints on
+    /// a timer: an application with a spinner, an animation or a blinking
+    /// cursor is never idle, so this never fires. Prefer --windows or --title.
+    #[arg(long)]
+    idle: Option<u64>,
+    /// Wait until the client exits.
+    #[arg(long)]
+    exit: bool,
+}
+
+impl WaitFor {
+    /// The single condition that was given.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message if none was, which clap's group should already have
+    /// refused — stated rather than asserted, because a panic is a poor way to
+    /// report an argument.
+    fn condition(self) -> Result<waypuppet_proto::Condition, String> {
+        use waypuppet_proto::Condition;
+
+        if let Some(count) = self.windows {
+            return Ok(Condition::Windows(count));
+        }
+        if let Some(pattern) = self.title {
+            return Ok(Condition::TitleMatches(pattern));
+        }
+        if let Some(frames) = self.frames {
+            return Ok(Condition::Frames(frames));
+        }
+        if let Some(millis) = self.idle {
+            return Ok(Condition::Idle(Duration::from_millis(millis)));
+        }
+        if self.exit {
+            return Ok(Condition::Exit);
+        }
+        Err("wait needs one of --windows, --title, --frames, --idle or --exit".to_owned())
+    }
 }
 
 fn main() -> ExitCode {
@@ -280,10 +352,13 @@ async fn dispatch(cli: Cli) -> ExitCode {
         Command::Move { x, y } => pointer(&socket, x, y).await,
         Command::Scroll { dx, dy } => scroll(&socket, dx, dy).await,
         Command::Resize { size, window } => resize(&socket, &size, window).await,
-        ref other => Err(format!(
-            "`{}` is designed but not implemented yet — see plans/",
-            verb(other)
-        )),
+        Command::Wait { condition, timeout } => wait(&socket, condition, timeout, cli.json).await,
+        // The last of them. `--help` still shows the whole designed surface
+        // rather than only the finished part, because the shape is the thing
+        // being committed to.
+        Command::Tree => {
+            Err("`tree` is designed but not implemented yet — see plans/07".to_owned())
+        }
     };
 
     match outcome {
@@ -582,6 +657,51 @@ async fn resize(socket: &Path, size: &str, window: Option<u32>) -> Result<ExitCo
     Ok(ExitCode::SUCCESS)
 }
 
+/// Block until a condition holds, or report that it did not.
+///
+/// The only verb whose failure to happen is not an error. Everything else here
+/// either works or explains itself; `wait` has a third answer, and a script
+/// polling for something that may legitimately not occur needs to be able to
+/// tell it from a session that fell over.
+async fn wait(
+    socket: &Path,
+    condition: WaitFor,
+    timeout: u64,
+    json: bool,
+) -> Result<ExitCode, String> {
+    let condition = condition.condition()?;
+    let timeout = Duration::from_millis(timeout);
+
+    let session = client::connect(socket).await?;
+    // The deadline sits beyond the timeout rather than replacing it: the
+    // session answers an elapsed timeout as a value, and only a session that
+    // has stopped answering at all should ever trip the transport.
+    let settled = session
+        .wait(
+            client::deadline(timeout + client::DEADLINE),
+            condition,
+            timeout,
+        )
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|failure| failure.to_string())?;
+
+    if json {
+        println!("{}", serde_json::json!({ "settled": settled }));
+    }
+
+    Ok(match settled {
+        // Silent, like every other verb that worked.
+        Settled::Met => ExitCode::SUCCESS,
+        Settled::TimedOut => {
+            if !json {
+                eprintln!("waypuppet: timed out after {}ms", timeout.as_millis());
+            }
+            ExitCode::from(TIMED_OUT)
+        }
+    })
+}
+
 /// Stop the session.
 async fn kill(socket: &Path) -> Result<ExitCode, String> {
     let session = client::connect(socket).await?;
@@ -715,27 +835,5 @@ fn parse_button(text: &str) -> Option<Button> {
         "right" | "r" | "3" => Some(Button::Right),
         "middle" | "m" | "2" => Some(Button::Middle),
         _ => None,
-    }
-}
-
-/// The subcommand's name, for the not-implemented message.
-fn verb(command: &Command) -> &'static str {
-    match command {
-        Command::Doctor => "doctor",
-        Command::Run { .. } => "run",
-        Command::Ps => "ps",
-        Command::Shot { .. } => "shot",
-        Command::Key { .. } => "key",
-        Command::Type { .. } => "type",
-        Command::Click { .. } => "click",
-        Command::Move { .. } => "move",
-        Command::Scroll { .. } => "scroll",
-        Command::Resize { .. } => "resize",
-        Command::Wait { .. } => "wait",
-        Command::Tree => "tree",
-        Command::Logs { .. } => "logs",
-        Command::Sessions => "sessions",
-        Command::Kill => "kill",
-        Command::Serve { .. } => "serve",
     }
 }

@@ -5,14 +5,12 @@
 //! framework; keep it flat.
 
 use std::{
-    collections::HashMap,
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
+    collections::{HashMap, HashSet},
+    sync::{Arc, Mutex, PoisonError},
     time::{Duration, Instant},
 };
 
+use regex::Regex;
 use smithay::{
     backend::{
         allocator::dmabuf::Dmabuf,
@@ -62,7 +60,7 @@ use waypuppet_proto::{Button, Failure, Point, Rect, Target, WindowId};
 
 use crate::{
     Config, Frame, Renderer,
-    bridge::Snapshot,
+    bridge::{Snapshot, Watched},
     input::{Keymap, Stroke},
 };
 
@@ -140,6 +138,45 @@ fn dmabuf_global(display: &DisplayHandle, renderer: &mut Renderer) -> Option<Dma
     Some(state)
 }
 
+/// The title and `app_id` a client set on a toplevel, if it set them.
+///
+/// Read from the surface's state rather than cached: smithay is already the
+/// point of truth, and a copy here would be one more thing to keep in step.
+fn names(surface: &WlSurface) -> (Option<String>, Option<String>) {
+    with_states(surface, |states| {
+        states
+            .data_map
+            .get::<XdgToplevelSurfaceData>()
+            .and_then(|data| data.lock().ok())
+            .map_or((None, None), |data| {
+                (data.title.clone(), data.app_id.clone())
+            })
+    })
+}
+
+/// Which clients are connected right now.
+///
+/// A set of identities rather than a count, because the two ends of a client's
+/// life are reported by different things and a counter cannot survive that.
+/// [`ClientId`] is invalidated by the backend when its client goes and compares
+/// equal only to itself, so inserting twice or removing something that was
+/// never there is a no-op instead of a corrupted total.
+///
+/// That is not hypothetical. This was an `AtomicUsize` incremented from
+/// [`ClientData::initialized`], which the C-library backend — the one
+/// smithay's `use_system_lib` selects — **never calls**, while it does call
+/// [`ClientData::disconnected`]. The counter was therefore stuck at zero for
+/// the whole life of a connected client, and wrapped to `usize::MAX` on the
+/// first disconnect. `ps` reported "starting" for a running application and
+/// "running" for a session with nothing in it.
+type Clients = Arc<Mutex<HashSet<ClientId>>>;
+
+/// Lock, tolerating poisoning: a panicking thread should not take the session
+/// with it when the data is this simple.
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// What a client gets attached to it when it connects.
 #[derive(Debug)]
 pub struct ClientState {
@@ -147,17 +184,18 @@ pub struct ClientState {
     pub compositor_state: CompositorClientState,
     /// Shared with [`State`], so the control protocol can tell a process that
     /// has been spawned from one that has actually connected.
-    connections: Arc<AtomicUsize>,
+    clients: Clients,
 }
 
 impl ClientData for ClientState {
-    fn initialized(&self, _client_id: ClientId) {
-        self.connections.fetch_add(1, Ordering::Relaxed);
-        tracing::debug!("client connected");
-    }
+    // `initialized` is deliberately not implemented. It is not called by every
+    // backend, so relying on it made the arrival of a client unobservable —
+    // see [`Clients`]. Arrival is recorded by [`State::client_connected`], at
+    // the point waypuppet itself accepts the connection, which is a fact this
+    // crate owns rather than one it hopes to be told.
 
-    fn disconnected(&self, _client_id: ClientId, reason: DisconnectReason) {
-        self.connections.fetch_sub(1, Ordering::Relaxed);
+    fn disconnected(&self, client_id: ClientId, reason: DisconnectReason) {
+        lock(&self.clients).remove(&client_id);
         tracing::debug!(?reason, "client disconnected");
     }
 }
@@ -194,6 +232,43 @@ struct Settling {
     after: u64,
     /// The call waiting on the frame.
     reply: oneshot::Sender<Result<(), Failure>>,
+}
+
+/// A `wait` held until the fact it names is true.
+///
+/// The same parked-sender pattern as [`Settling`], and the same obligation: the
+/// sender lives here only while its condition is still *possible*, so a window
+/// that goes away, or a compositor thread that dies, fails the call at once
+/// rather than on its deadline.
+struct Waiting {
+    /// What is being watched, resolved against the moment it arrived.
+    watch: Watch,
+    /// The call waiting on it.
+    reply: oneshot::Sender<Result<(), Failure>>,
+}
+
+/// A [`Watched`] condition resolved against the state it was parked in.
+///
+/// Resolving on arrival is what makes these exact rather than approximate.
+/// `Frames(2)` becomes an absolute commit count, so re-evaluating it cannot
+/// drift and a frame that lands while the reply is being parked still counts. A
+/// pattern becomes a compiled [`Regex`], so a typo is reported once, to the
+/// caller who made it, instead of silently matching nothing forever.
+enum Watch {
+    /// At least this many windows are mapped.
+    Windows(usize),
+    /// Some mapped window's title matches.
+    Title(Regex),
+    /// A specific surface has committed at least this many frames in total.
+    Frames {
+        /// The surface being counted. Named, so the wait can be failed when it
+        /// goes away rather than left counting a window nobody has.
+        surface: WlSurface,
+        /// The commit count that satisfies the wait.
+        until: u64,
+    },
+    /// Nothing has committed for this long.
+    Idle(Duration),
 }
 
 /// Everything the compositor owns.
@@ -238,8 +313,16 @@ pub struct State {
     keymap: Keymap,
     /// Replies waiting on a client frame.
     settling: Vec<Settling>,
+    /// Replies waiting on a condition, for `wait`.
+    waiting: Vec<Waiting>,
     /// When frame callbacks were last answered, for [`FRAME_INTERVAL`].
     last_frames: Instant,
+    /// When any surface last committed a buffer, for [`Watch::Idle`].
+    ///
+    /// Seeded at startup rather than left optional: a session where nothing has
+    /// ever drawn has been idle since it began, which is both true and the
+    /// answer a caller wants.
+    last_commit: Instant,
 
     /// Monotonic time source for frame callbacks.
     clock: Clock<Monotonic>,
@@ -256,8 +339,8 @@ pub struct State {
     /// The output's logical size and scale, as the control protocol reports
     /// them.
     reported: (waypuppet_proto::Size, f64),
-    /// How many Wayland clients are currently connected.
-    connections: Arc<AtomicUsize>,
+    /// Which Wayland clients are currently connected.
+    clients: Clients,
     /// The output's logical size, which is also every window's size.
     output_size: SmithaySize<i32, Logical>,
     /// Source of the next [`WindowId`].
@@ -364,12 +447,14 @@ impl State {
             records: HashMap::new(),
             keymap,
             settling: Vec::new(),
+            waiting: Vec::new(),
             last_frames: Instant::now(),
+            last_commit: Instant::now(),
             clock: Clock::new(),
             renderer,
             dmabuf,
             reported: (config.output, config.scale),
-            connections: Arc::new(AtomicUsize::new(0)),
+            clients: Clients::default(),
             output_size,
             next_window_id: 1,
         })
@@ -393,8 +478,28 @@ impl State {
     pub fn new_client_state(&self) -> ClientState {
         ClientState {
             compositor_state: CompositorClientState::default(),
-            connections: Arc::clone(&self.connections),
+            clients: Arc::clone(&self.clients),
         }
+    }
+
+    /// Record that `client` is connected.
+    ///
+    /// Called where waypuppet accepts the connection, which is the only place
+    /// it can be sure of: `ClientData::initialized` is not called by every
+    /// backend, and the one this crate builds against is among those that do
+    /// not. See [`Clients`].
+    pub fn client_connected(&self, client: ClientId) {
+        lock(&self.clients).insert(client);
+        tracing::debug!("client connected");
+    }
+
+    /// How many Wayland clients are connected.
+    ///
+    /// Zero after a spawn means the process started but has not reached the
+    /// compositor — a different problem from one that connected and crashed.
+    #[must_use]
+    pub fn connections(&self) -> usize {
+        lock(&self.clients).len()
     }
 
     /// Whether the session is rendering in software, if it renders at all.
@@ -447,15 +552,7 @@ impl State {
                 let surface = toplevel.wl_surface();
                 let record = self.records.get(surface)?;
                 let geometry = self.space.element_geometry(window)?;
-                let (title, app_id) = with_states(surface, |states| {
-                    states
-                        .data_map
-                        .get::<XdgToplevelSurfaceData>()
-                        .and_then(|data| data.lock().ok())
-                        .map_or((None, None), |data| {
-                            (data.title.clone(), data.app_id.clone())
-                        })
-                });
+                let (title, app_id) = names(surface);
 
                 Some(waypuppet_proto::Window {
                     id: record.id,
@@ -483,7 +580,7 @@ impl State {
             output,
             scale,
             windows,
-            connections: self.connections.load(Ordering::Relaxed),
+            connections: self.connections(),
         }
     }
 
@@ -889,17 +986,173 @@ impl State {
 
     /// Drop replies nobody is listening for any more.
     ///
-    /// A caller that hit its settle timeout dropped its receiver, which closes
-    /// the sender here. Without this sweep those entries would accumulate for
-    /// the life of the session — a slow leak rather than a hang, but a leak.
-    pub fn prune_settling(&mut self) {
+    /// A caller that hit its timeout dropped its receiver, which closes the
+    /// sender here. Without this sweep both registries would accumulate entries
+    /// for the life of the session — a slow leak rather than a hang, but a
+    /// leak.
+    pub fn prune_parked(&mut self) {
         self.settling.retain(|entry| !entry.reply.is_closed());
+        self.waiting.retain(|entry| !entry.reply.is_closed());
     }
 
-    /// How many replies are parked, for tests.
+    /// How many replies are parked on a frame, for tests.
     #[must_use]
     pub fn settling(&self) -> usize {
         self.settling.len()
+    }
+
+    // -------------------------------------------------------------- waiting --
+
+    /// Park `reply` until `condition` holds.
+    ///
+    /// # The condition is checked before it is parked
+    ///
+    /// The check at the end is not an optimisation. `waypuppet run --detach`
+    /// followed by `waypuppet wait --windows 1` is a race the caller cannot
+    /// win: the window may well have mapped before the request arrived. A
+    /// registry that only answered on the *next* change would make that a coin
+    /// flip between an instant reply and a full timeout, which is precisely the
+    /// flakiness `wait` exists to remove.
+    pub fn park_wait(&mut self, condition: Watched, reply: oneshot::Sender<Result<(), Failure>>) {
+        let watch = match self.resolve(condition) {
+            Ok(watch) => watch,
+            // Nothing to wait for, and no amount of waiting would produce one.
+            // Answering now is what keeps failure mode B from existing.
+            Err(failure) => {
+                let _ = reply.send(Err(failure));
+                return;
+            }
+        };
+        self.waiting.push(Waiting { watch, reply });
+        self.check_waits();
+    }
+
+    /// Resolve a condition against the state it arrived in.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Failure::BadPattern`] for a title pattern that will not
+    /// compile, or [`Failure::NoSuchWindow`] for a frame count with no window
+    /// to count.
+    fn resolve(&self, condition: Watched) -> Result<Watch, Failure> {
+        Ok(match condition {
+            Watched::Windows(count) => Watch::Windows(count),
+            Watched::Idle(quiet) => Watch::Idle(quiet),
+            Watched::Title(pattern) => match Regex::new(&pattern) {
+                Ok(regex) => Watch::Title(regex),
+                Err(why) => {
+                    return Err(Failure::BadPattern {
+                        pattern,
+                        why: why.to_string(),
+                    });
+                }
+            },
+            // Relative on the wire, absolute here. Anchoring to the count at
+            // this instant is what makes "two more frames" mean two more than
+            // the caller had seen, whatever arrives while the reply is parked.
+            Watched::Frames(frames) => {
+                let surface = self.settle_surface(Target::Focused)?;
+                let record = self.records.get(&surface).ok_or(Failure::NoSuchWindow)?;
+                Watch::Frames {
+                    until: record.frames.saturating_add(u64::from(frames)),
+                    surface,
+                }
+            }
+        })
+    }
+
+    /// Answer every parked `wait` whose condition now holds.
+    ///
+    /// Called from wherever a fact one of them names can change — a commit, a
+    /// title, a window arriving or leaving — rather than from a sweep on the
+    /// loop. waypuppet is the compositor: it is *told* when these change, so
+    /// polling for them would be choosing not to listen.
+    ///
+    /// [`Watch::Idle`] is the exception, and [`State::check_idle`] is why.
+    pub fn check_waits(&mut self) {
+        self.answer_waits(|_| true);
+    }
+
+    /// Answer parked `wait`s that only the passage of time can satisfy.
+    ///
+    /// [`Watch::Idle`] becomes true through the *absence* of commits, so there
+    /// is no event to hang it off — it needs the loop. Keeping it separate from
+    /// [`State::check_waits`] means the others stay event-driven, and that a
+    /// missing hook shows up as a test that hangs rather than as a wait that
+    /// quietly resolves up to a tick late.
+    pub fn check_idle(&mut self) {
+        self.answer_waits(|watch| matches!(watch, Watch::Idle(_)));
+    }
+
+    /// Answer the parked `wait`s `considered` selects, if they hold.
+    fn answer_waits(&mut self, considered: impl Fn(&Watch) -> bool) {
+        if self.waiting.is_empty() {
+            return;
+        }
+        // Taken rather than drained: `holds` needs the rest of `self`, which a
+        // live borrow of `self.waiting` would rule out.
+        let mut still = Vec::with_capacity(self.waiting.len());
+        for entry in std::mem::take(&mut self.waiting) {
+            if considered(&entry.watch) && self.holds(&entry.watch) {
+                let _ = entry.reply.send(Ok(()));
+            } else {
+                still.push(entry);
+            }
+        }
+        self.waiting = still;
+    }
+
+    /// Whether a condition is true right now.
+    fn holds(&self, watch: &Watch) -> bool {
+        match watch {
+            Watch::Windows(wanted) => self.mapped_windows() >= *wanted,
+            Watch::Title(pattern) => self.records.iter().any(|(surface, record)| {
+                record.mapped
+                    && names(surface)
+                        .0
+                        .is_some_and(|title| pattern.is_match(&title))
+            }),
+            Watch::Frames { surface, until } => self
+                .records
+                .get(surface)
+                .is_some_and(|record| record.frames >= *until),
+            Watch::Idle(quiet) => self.last_commit.elapsed() >= *quiet,
+        }
+    }
+
+    /// How many windows have content.
+    fn mapped_windows(&self) -> usize {
+        self.records.values().filter(|record| record.mapped).count()
+    }
+
+    /// Fail every `wait` that was counting on a window which has gone away.
+    ///
+    /// Only [`Watch::Frames`] can become impossible this way, because only it
+    /// names a specific surface. Another window could still map, or be titled,
+    /// or leave the session quiet, so the rest keep waiting — failing them here
+    /// would be answering a question nobody asked.
+    fn abandon_waits(&mut self, surface: &WlSurface) {
+        let mut still = Vec::with_capacity(self.waiting.len());
+        for entry in std::mem::take(&mut self.waiting) {
+            match &entry.watch {
+                Watch::Frames {
+                    surface: counted, ..
+                } if counted == surface => {
+                    // Explicitly, rather than by dropping the sender: a dropped
+                    // one arrives as `ShuttingDown`, which would blame the
+                    // session for a window that merely closed.
+                    let _ = entry.reply.send(Err(Failure::ClientGone));
+                }
+                _ => still.push(entry),
+            }
+        }
+        self.waiting = still;
+    }
+
+    /// How many `wait`s are parked, for tests.
+    #[must_use]
+    pub fn waiting(&self) -> usize {
+        self.waiting.len()
     }
 
     /// Hand out the next window identifier.
@@ -972,7 +1225,13 @@ impl CompositorHandler for State {
         if newly_mapped {
             self.focus_on(&root);
         }
+        // A commit is the only thing that ends a quiet spell, so this is where
+        // `wait --idle` measures from.
+        self.last_commit = Instant::now();
         self.wake_settled(&root, frames);
+        // Three of the four watchable conditions can have just become true:
+        // a first frame maps a window, and any frame advances a count.
+        self.check_waits();
     }
 }
 
@@ -1082,6 +1341,14 @@ impl XdgShellHandler for State {
         tracing::debug!(id = id.0, "toplevel created");
     }
 
+    fn title_changed(&mut self, _surface: ToplevelSurface) {
+        // `wait --title` is answered from here rather than from a sweep. A
+        // client is free to rename its window and then draw nothing ever again,
+        // so the title itself is the event: without this hook such a wait would
+        // sit parked on a condition that was already true.
+        self.check_waits();
+    }
+
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
         if let Some(record) = self.records.remove(surface.wl_surface()) {
             tracing::debug!(id = record.id.0, "toplevel destroyed");
@@ -1091,6 +1358,7 @@ impl XdgShellHandler for State {
         // lifetime to the condition still being possible is the whole reason
         // failure-mode B mostly does not exist here.
         self.abandon_settled(surface.wl_surface());
+        self.abandon_waits(surface.wl_surface());
     }
 
     fn new_popup(&mut self, _surface: PopupSurface, _positioner: PositionerState) {

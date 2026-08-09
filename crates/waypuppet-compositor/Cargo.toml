@@ -17,6 +17,7 @@ waypuppet-proto.workspace = true
 calloop.workspace = true
 futures.workspace = true
 png.workspace = true
+regex.workspace = true
 tarpc.workspace = true
 tokio.workspace = true
 # Feature selection, and the reasoning behind it, lives on the workspace dependency.
@@ -61,3 +62,7 @@ path = "tests/dmabuf.rs"
 [[test]]
 name = "frames"
 path = "tests/frames.rs"
+
+[[test]]
+name = "wait"
+path = "tests/wait.rs"

@@ -262,6 +262,136 @@ where
     }
 }
 
+// ----------------------------------------------------------------- control --
+
+/// A whole session — compositor, child process and control socket — for the
+/// tests [`Harness`] deliberately cannot serve.
+///
+/// [`Harness`] owns a compositor and nothing else, which is right for almost
+/// everything: the facts under test are protocol facts. `wait --exit` is the
+/// exception. The child process belongs to the control thread, and a process
+/// can exit without ever having connected, so there is no Wayland event to
+/// observe and no way to test it without the real thing.
+pub mod control {
+    use std::{path::PathBuf, thread::JoinHandle, time::Duration};
+
+    use tarpc::{client, context, tokio_serde::formats::Bincode};
+    use waypuppet_compositor::{Config, Error, session};
+    use waypuppet_proto::{Size, WaypuppetClient};
+
+    /// Long enough for software rendering, short enough to fail while somebody
+    /// is watching.
+    pub const LIMIT: Duration = Duration::from_secs(20);
+
+    /// Small: nothing here renders, and a session is started per test.
+    const OUTPUT: Size = Size {
+        width: 64,
+        height: 48,
+    };
+
+    /// A session running on its own thread.
+    ///
+    /// Every call against it carries a deadline and the socket wait is bounded,
+    /// so the only way to hang is [`Serving::join`] on a session that was never
+    /// asked to stop. Call `kill` first, as a caller would.
+    pub struct Serving {
+        /// Where the control socket lives.
+        pub socket: PathBuf,
+        /// Held so the socket and capture directory outlive the session.
+        _directory: tempfile::TempDir,
+        thread: Option<JoinHandle<Result<Option<i32>, Error>>>,
+    }
+
+    impl Serving {
+        /// Start a session, optionally hosting `argv`.
+        ///
+        /// # Panics
+        ///
+        /// Panics if the temporary directory or the session thread cannot be
+        /// created.
+        #[must_use]
+        pub fn start(argv: &[&str]) -> Self {
+            let directory = tempfile::tempdir().expect("temp dir");
+            let socket = directory.path().join("control.sock");
+            let captures = directory.path().to_path_buf();
+            let argv: Vec<String> = argv.iter().map(|part| (*part).to_owned()).collect();
+
+            let thread = std::thread::spawn({
+                let socket = socket.clone();
+                move || {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("tokio runtime");
+                    runtime.block_on(session::serve(
+                        &Config {
+                            output: OUTPUT,
+                            capture_dir: captures,
+                            ..Config::default()
+                        },
+                        &socket,
+                        &argv,
+                        false,
+                    ))
+                }
+            });
+
+            Self {
+                socket,
+                _directory: directory,
+                thread: Some(thread),
+            }
+        }
+
+        /// Connect a typed client once the session is listening.
+        ///
+        /// The poll here is not the sleep-for-synchronisation the project bans:
+        /// it checks the condition it is waiting for — that the socket accepts
+        /// a connection — rather than guessing how long the condition takes.
+        /// There is no in-process signal to use instead, because `serve` is
+        /// what creates the socket.
+        ///
+        /// # Panics
+        ///
+        /// Panics if the session never starts listening within [`LIMIT`].
+        pub async fn connect(&self) -> WaypuppetClient {
+            let deadline = tokio::time::Instant::now() + LIMIT;
+            while tokio::time::Instant::now() < deadline {
+                if let Ok(transport) =
+                    tarpc::serde_transport::unix::connect(&self.socket, Bincode::default).await
+                {
+                    return WaypuppetClient::new(client::Config::default(), transport).spawn();
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            panic!("the session never listened on {}", self.socket.display());
+        }
+
+        /// Wait for the session thread to finish.
+        ///
+        /// # Panics
+        ///
+        /// Panics if the thread panicked or the session did not shut down
+        /// cleanly.
+        pub fn join(mut self) {
+            if let Some(thread) = self.thread.take() {
+                thread
+                    .join()
+                    .expect("the session thread finishes")
+                    .expect("the session shuts down cleanly");
+            }
+        }
+    }
+
+    /// A call context with a bounded deadline — as everything here has.
+    #[must_use]
+    pub fn deadline() -> context::Context {
+        let mut context = context::current();
+        context.deadline = std::time::Instant::now() + LIMIT;
+        context
+    }
+}
+
 // ----------------------------------------------------------------- harness --
 
 /// A compositor and the clients driven against it.
@@ -412,6 +542,21 @@ impl Harness {
     pub fn await_frame(&mut self, client: &mut ClientThread) {
         client.send(ClientCommand::AwaitFrame);
         self.await_reply(client, "a frame callback");
+    }
+
+    /// Have the client rename its window, without drawing anything.
+    ///
+    /// Without drawing is the point: `xdg_toplevel.set_title` is not double
+    /// buffered, so a rename is observable the instant it is requested and
+    /// there is no commit behind it to notice. A `wait --title` that only woke
+    /// on frames would sit parked through this.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the client does not answer within [`WAIT_LIMIT`].
+    pub fn retitle(&mut self, client: &mut ClientThread, title: &str) {
+        client.send(ClientCommand::Title(title.to_owned()));
+        self.await_reply(client, "the client to rename its window");
     }
 
     /// Have the client fill its window with one colour and commit it.
@@ -581,6 +726,8 @@ impl ClientThread {
 enum ClientCommand {
     /// Block until configured, and report the size.
     Configure,
+    /// Rename the window, with no commit behind it.
+    Title(String),
     /// Fill the window and commit, through `wl_shm`.
     Paint([u8; 4]),
     /// The same, through `zwp_linux_dmabuf_v1`.
@@ -627,6 +774,10 @@ fn client_thread(
                 size = client.wait_for_configure();
                 Reply::Configured(size.0, size.1)
             }
+            ClientCommand::Title(title) => {
+                client.set_title(&title);
+                Reply::Done
+            }
             ClientCommand::Paint(rgba) => {
                 client.paint(size, rgba);
                 Reply::Done
@@ -660,7 +811,7 @@ struct Client {
     handle: QueueHandle<Events>,
     shm: WlShm,
     surface: WlSurface,
-    _toplevel: XdgToplevel,
+    toplevel: XdgToplevel,
     /// Held so the compositor keeps sending to them.
     _keyboard: WlKeyboard,
     _pointer: WlPointer,
@@ -860,7 +1011,7 @@ impl Client {
             handle,
             shm,
             surface,
-            _toplevel: toplevel,
+            toplevel,
             _keyboard: keyboard,
             _pointer: pointer,
             dmabuf,
@@ -885,6 +1036,18 @@ impl Client {
                 .blocking_dispatch(&mut self.events)
                 .expect("the connection is healthy");
         }
+    }
+
+    /// Rename the window and make sure the compositor has read the request.
+    ///
+    /// The roundtrip is what makes the caller's next assertion meaningful: it
+    /// returns only once the compositor has processed everything sent before
+    /// it, so "the title has not taken effect yet" is not an available excuse.
+    fn set_title(&mut self, title: &str) {
+        self.toplevel.set_title(title.to_owned());
+        self.connection
+            .roundtrip()
+            .expect("the connection is healthy");
     }
 
     /// Dispatch whatever has arrived and hand back the input in it.

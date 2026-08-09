@@ -35,7 +35,7 @@ use waypuppet_proto::{
     Settled, Size, Target, Waypuppet,
 };
 
-use crate::{Command, Commands, Compositor, Config, Error};
+use crate::{Command, Commands, Compositor, Config, Error, Watching};
 
 /// How long the server waits for the compositor to answer a command.
 ///
@@ -388,6 +388,37 @@ impl Server {
         let n = self.0.captures.fetch_add(1, Ordering::Relaxed);
         self.0.capture_dir.join(format!("waypuppet-{n:04}.png"))
     }
+
+    /// Block until the child exits, which only this thread can see.
+    ///
+    /// The compositor's registry cannot answer this one: a process may exit
+    /// without ever having connected, so there is no Wayland event to hang it
+    /// off. [`Inner::activity`] is already woken when the child goes, for the
+    /// benefit of `logs`, and serves here for the same reason.
+    async fn wait_for_exit(&self, timeout: Duration) -> Result<Settled, Failure> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            // Registered *before* the check, or an exit landing between the two
+            // would go unnoticed until the deadline.
+            let waiting = self.0.activity.notified();
+
+            match *lock(&self.0.client) {
+                Life::Exited(_) => return Ok(Settled::Met),
+                // Nothing was ever spawned, so nothing can ever exit. Parking
+                // here would be failure mode B — waiting on the impossible —
+                // and a caller who asked this of a childless session has made a
+                // mistake worth hearing about now. Not `ClientGone`: telling
+                // somebody whose application never started that it has died is
+                // the worst available answer.
+                Life::None => return Err(Failure::NoClient),
+                Life::Running => {}
+            }
+
+            if tokio::time::timeout_at(deadline, waiting).await.is_err() {
+                return Ok(Settled::TimedOut);
+            }
+        }
+    }
 }
 
 impl Waypuppet for Server {
@@ -548,13 +579,26 @@ impl Waypuppet for Server {
             .await
     }
 
+    // `wait` is the one verb the session answers from both halves of itself.
+    // Four of the five conditions are protocol facts the compositor observes;
+    // the fifth is about a process the compositor has never been told about.
+    // [`Watching`] is that split, made total so neither half can be handed a
+    // condition it cannot see.
     async fn wait(
         self,
         _: Context,
-        _condition: Condition,
-        _timeout: Duration,
+        condition: Condition,
+        timeout: Duration,
     ) -> Result<Settled, Failure> {
-        Err(unimplemented("wait"))
+        match Watching::from(condition) {
+            Watching::Compositor(condition) => {
+                self.0
+                    .commands
+                    .until(timeout, |reply| Command::Wait { condition, reply })
+                    .await
+            }
+            Watching::Exit => self.wait_for_exit(timeout).await,
+        }
     }
 
     async fn tree(self, _: Context, _target: Target) -> Result<Node, Failure> {

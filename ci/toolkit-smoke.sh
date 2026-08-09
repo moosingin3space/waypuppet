@@ -10,11 +10,16 @@
 # What it asserts, in order:
 #
 #   1. a real GTK 3 application maps a window        — the compositor is a usable host
-#   2. `click` and `type` return successfully        — they settled, so the client drew
-#   3. the capture changes as a result               — the input actually reached the app
+#   2. `wait --title` matches it                     — window bookkeeping survives a toolkit
+#   3. `click` and `type` return successfully        — they settled, so the client drew
+#   4. the capture changes as a result               — the input actually reached the app
 #
-# (3) is the one that matters. Without a seat, or without frame callbacks, the first two
+# (4) is the one that matters. Without a seat, or without frame callbacks, the others
 # either fail outright or the picture never changes.
+#
+# Note what is absent: there is no `sleep` anywhere below. Every step blocks on a fact the
+# session observed, which is the property waypuppet exists to provide and the fastest way
+# to notice if it stops being true.
 set -eu
 
 session=toolkit-smoke
@@ -38,34 +43,36 @@ waypuppet() { "$bin" --session "$session" "$@"; }
 
 cleanup() {
     waypuppet kill >/dev/null 2>&1 || true
-    wait 2>/dev/null || true
 }
 trap cleanup EXIT
 
+# `run --detach` rather than `serve &`: it returns only once the control socket is
+# accepting connections, so the very next line can talk to the session. Backgrounding
+# `serve` would leave a window in which `wait` has nothing to connect to.
 echo "smoke: hosting $app at $size"
-waypuppet serve --size "$size" -- "$app" >"$out/session.log" 2>&1 &
+waypuppet run --detach --size "$size" -- "$app" >"$out/session.log" 2>&1
 
-# Polling on a protocol fact the session reports, not a blind sleep. This becomes
-# `waypuppet wait --windows 1` once plan 05 lands; until then the loop is here rather than
-# a `sleep 5`, because a fixed sleep is either flaky or slow and usually both.
-mapped=
-i=0
-while [ "$i" -lt "$deadline" ]; do
-    if waypuppet ps --json 2>/dev/null | grep -q '"mapped":true'; then
-        mapped=yes
-        break
-    fi
-    sleep 1
-    i=$((i + 1))
-done
-
-if [ -z "$mapped" ]; then
+# The compositor is the thing that knows when a client maps a window, so ask it rather
+# than polling `ps` on a timer. This returns the instant it happens, and exits 3 — not
+# 1 — if it never does, which is how "the app did not start" is told apart from "the
+# session fell over".
+echo "smoke: waiting for a window"
+if ! waypuppet wait --windows 1 --timeout "$((deadline * 1000))"; then
     echo "smoke: $app never mapped a window within ${deadline}s" >&2
     echo "--- session log ---" >&2
     cat "$out/session.log" >&2
     exit 1
 fi
-echo "smoke: window mapped after ${i}s"
+
+# Deliberately not the application's own wording: what is under test is that a title set
+# by a real toolkit reaches the registry and matches, not what GTK happens to call this
+# release's window. Hard-coding that would be a smoke test that fails on an upgrade.
+if ! waypuppet wait --title . --timeout 5000; then
+    echo "smoke: the mapped window has no title the session can see" >&2
+    waypuppet ps >&2 || true
+    exit 1
+fi
+echo "smoke: window mapped and titled"
 
 waypuppet shot -o "$out/before.png" >/dev/null
 echo "smoke: clicking and typing"

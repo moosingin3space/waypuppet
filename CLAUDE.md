@@ -129,6 +129,75 @@ is `ask` with exactly one substitution: a healthy loop that ran out of time is
 `NotSettled`, a loop that stopped ticking is still `LoopStalled`. Keep it a wrapper, so the
 heartbeat stays the single place that decides whose fault a timeout is.
 
+### Conditions are woken by events, not swept for
+
+`wait` parks a sender in `State::waiting` and the registry is woken from the places the
+facts change: `commit`, `title_changed`, and `park_wait` itself for a condition that is
+already true. It is never swept on the loop. waypuppet is the compositor — it is *told*
+when a window maps or a title changes — so polling for those would be choosing not to
+listen.
+
+`Idle` is the exception, and `check_idle` on the loop is the exception's shape. Going quiet
+is the *absence* of commits, so there is no event to hang it off.
+
+Evaluating everything per tick would be fewer lines and correct to within 16ms. It was the
+first design and it was dropped, because it makes the arrival check unfalsifiable: with a
+per-tick sweep, deleting that check still passes every test one tick later. Keeping the
+conditions event-driven is what makes "a defence you can break" possible here at all.
+
+Two consequences worth carrying forward:
+
+- **Resolve a condition when it arrives, not when it is checked.** `Frames(2)` becomes an
+  absolute commit count against a named surface; a pattern becomes a compiled `Regex`. A
+  bad pattern is then reported once, to the caller who wrote it, instead of silently
+  matching nothing until the timeout.
+- **A new hook is a new way to hang.** Adding a condition means finding every place its
+  fact can change. `title_changed` was nearly missed: `set_title` is not double buffered,
+  so a client can rename its window and never draw again, and a registry woken only by
+  frames leaves that wait parked forever.
+
+### Timing out is an outcome, not an error
+
+`Settled::TimedOut` is a value the caller receives, not a `Failure`. "It did not happen" is
+something a script may well be expecting, and it must be distinguishable from "waypuppet
+fell over". On the CLI that is exit 3 — not 2, which clap already spends on usage errors.
+
+`Commands::until` is the third wrapper around `ask`, alongside `settle`. All three are the
+same wait with one substitution each, so `Heartbeat::diagnose` stays the single place that
+decides whose fault an expired wait was. A stalled loop is still `LoopStalled` through every
+one of them; laundering that into a clean timeout is precisely what this project refuses to
+do.
+
+### Some conditions belong to the control thread
+
+`wait --exit` is about the child process, which the compositor has never been told about: a
+process can exit without ever making a Wayland connection. `bridge::Watching` is that split,
+with a `Compositor(Watched)` arm and an `Exit` arm, so neither half is ever handed a
+condition it cannot see. The first draft passed all five conditions to the compositor and
+needed a "cannot happen" arm — and an arm that cannot happen is an arm that answers wrongly
+when it does.
+
+### Track lifecycles, not counts
+
+`State::clients` is a `HashSet<ClientId>`, not a counter, and arrival is recorded where
+waypuppet accepts the connection rather than from `ClientData::initialized`.
+
+Both halves of that were bought with a real bug. The C-library backend — which
+`use_system_lib` selects, and which waypuppet needs for `wl_drm` — **never calls
+`initialized`**, though it does call `disconnected`. A count incremented in one and
+decremented in the other was therefore stuck at zero while a client was connected, and
+wrapped to `usize::MAX` on the first disconnect, because atomics wrap silently even in
+debug. `ps` reported "starting" for a running application and "running" for an empty
+session.
+
+The general lesson is worth more than the fix: **a count is a lossy summary of a lifecycle,
+and it cannot self-correct.** A set of identities can — inserting twice or removing
+something absent is a no-op, so a missed or duplicated callback costs nothing. Prefer
+identities wherever the two ends of a life are reported by different mechanisms.
+
+And prefer a fact this crate observes to one it is told: `insert_client` returning `Ok` is
+waypuppet accepting a client, which no backend can decline to mention.
+
 ### Input resolves against a pinned keymap
 
 The layout is `us` and is stated in `input::LAYOUT`, not inherited from the environment:
@@ -347,10 +416,21 @@ toolkit needs. A real one is hosted end to end: GTK 3's `gtk3-widget-factory` is
 clicked into and typed at, and `hello` appears in the next capture with no sleep anywhere.
 `ci/toolkit-smoke.sh` keeps it that way.
 
+`wait` blocks on facts rather than sleeps: `--windows`, `--title`, `--frames`, `--idle` and
+`--exit` are answered from bookkeeping the compositor already keeps, and a condition that is
+already true returns immediately. `--windows` and `--title` are the dependable ones;
+`--frames` and `--idle` carry stated caveats, because frames arrive whether or not the
+caller caused them and anything with a spinner is never idle.
+
+There is now **no sleep used for synchronisation anywhere in the project**, including
+`ci/toolkit-smoke.sh`, which drives a real GTK application. `tests/stall.rs` sleeps because
+sleeping is the fault under test, and two socket polls check the condition they wait on
+rather than guessing at it; a sleep standing in for a condition is a bug.
+
 CI runs on every push — see [`docs/project-ci.md`](docs/project-ci.md). `just ci` runs the
 same thing locally, in the same image, so "will CI agree?" does not need a push to answer.
 
-Not yet: `wait`, the clipboard, and the accessibility tree.
+Not yet: the clipboard and the accessibility tree.
 
 **The roadmap lives in [`plans/`](plans/)** — one file per phase, in the order they should
 land, each with its own acceptance criteria and, once landed, what it taught us.

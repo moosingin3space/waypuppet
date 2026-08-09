@@ -33,7 +33,7 @@ use std::{
 
 use calloop::ping::Ping;
 use tokio::sync::{mpsc, oneshot};
-use waypuppet_proto::{Button, Failure, Point, Size, Target, Window};
+use waypuppet_proto::{Button, Condition, Failure, Point, Settled, Size, Target, Window};
 
 use crate::Frame;
 
@@ -53,6 +53,50 @@ pub struct Snapshot {
     /// process started but has not reached the compositor — which is a
     /// different problem from a process that connected and then crashed.
     pub connections: usize,
+}
+
+/// A condition the compositor can answer for itself.
+///
+/// Every [`Condition`] but [`Condition::Exit`]. The compositor has never been
+/// told there is a child process — it sees Wayland connections, and a process
+/// can exit without ever making one — so that condition belongs to the control
+/// thread, which spawned it.
+///
+/// Splitting the two here rather than inside the compositor is what keeps the
+/// loop's match total. A single enum carrying all five would need a "cannot
+/// happen" arm, and an arm that cannot happen is an arm that answers wrongly
+/// when it does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Watched {
+    /// At least this many windows are mapped.
+    Windows(usize),
+    /// A mapped window's title matches this regular expression.
+    Title(String),
+    /// The focused window commits this many further frames.
+    Frames(u32),
+    /// Nothing commits for this long.
+    Idle(Duration),
+}
+
+/// Which half of a session can see a [`Condition`] become true.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Watching {
+    /// The compositor observes it, over the bridge.
+    Compositor(Watched),
+    /// Only the control thread does: it owns the child process.
+    Exit,
+}
+
+impl From<Condition> for Watching {
+    fn from(condition: Condition) -> Self {
+        match condition {
+            Condition::Windows(count) => Self::Compositor(Watched::Windows(count)),
+            Condition::TitleMatches(pattern) => Self::Compositor(Watched::Title(pattern)),
+            Condition::Frames(frames) => Self::Compositor(Watched::Frames(frames)),
+            Condition::Idle(quiet) => Self::Compositor(Watched::Idle(quiet)),
+            Condition::Exit => Self::Exit,
+        }
+    }
 }
 
 /// Something for the compositor thread to do.
@@ -124,6 +168,18 @@ pub enum Command {
         /// Window target.
         target: Target,
         /// Reply after the client settles.
+        reply: oneshot::Sender<Result<(), Failure>>,
+    },
+    /// Park a reply until a fact the compositor observes is true.
+    ///
+    /// Unlike the settling verbs above, nothing is delivered first — there is
+    /// no event to send, only a condition to watch. The reply is answered when
+    /// the condition holds, failed when it becomes impossible, and dropped if
+    /// the compositor goes away.
+    Wait {
+        /// What to watch for.
+        condition: Watched,
+        /// Answered once it holds.
         reply: oneshot::Sender<Result<(), Failure>>,
     },
 }
@@ -310,6 +366,38 @@ impl Commands {
             Err(other) => Err(other),
         }
     }
+
+    /// Park a request until the compositor says its condition holds.
+    ///
+    /// The same wait again, with the substitution a `wait` needs: a healthy
+    /// loop that ran out of time means **the condition did not happen**, which
+    /// is [`Settled::TimedOut`] — an outcome the caller may well have expected,
+    /// and not an error at all. A loop that stopped ticking still reports
+    /// [`Failure::LoopStalled`].
+    ///
+    /// That is the whole reason this is a wrapper rather than its own timeout:
+    /// three verbs now describe an expired wait three different ways, and
+    /// [`Heartbeat::diagnose`] remains the single place that decides whose
+    /// fault it was.
+    ///
+    /// # Errors
+    ///
+    /// - [`Failure::LoopStalled`] if the compositor loop stopped.
+    /// - [`Failure::ShuttingDown`] if the compositor thread is gone.
+    /// - Whatever made the condition impossible, such as
+    ///   [`Failure::ClientGone`] or [`Failure::BadPattern`].
+    pub async fn until(
+        &self,
+        timeout: Duration,
+        build: impl FnOnce(oneshot::Sender<Result<(), Failure>>) -> Command,
+    ) -> Result<Settled, Failure> {
+        match self.ask(timeout, build).await {
+            Ok(Ok(())) => Ok(Settled::Met),
+            Ok(Err(failure)) => Err(failure),
+            Err(Failure::TimedOut { .. }) => Ok(Settled::TimedOut),
+            Err(other) => Err(other),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -318,7 +406,7 @@ mod tests {
 
     use calloop::ping::make_ping;
 
-    use super::{Command, Commands, Failure, Heartbeat};
+    use super::{Command, Commands, Failure, Heartbeat, Settled, Watched};
     use std::{sync::Arc, time::Duration};
 
     /// Short enough to keep the suite quick, long enough not to be flaky on a
@@ -459,6 +547,55 @@ mod tests {
         assert!(
             matches!(failure, Failure::LoopStalled { .. }),
             "a settling verb must not launder a stalled loop into NotSettled: {failure:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_wait_that_ran_out_of_time_is_an_outcome_rather_than_an_error() {
+        let (commands, _receiver, _source) = bridge();
+        let heartbeat = Arc::clone(commands.heartbeat());
+
+        tokio::spawn(async move {
+            loop {
+                heartbeat.beat();
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        });
+
+        let settled = commands
+            .until(DEADLINE, |reply| Command::Wait {
+                condition: Watched::Windows(1),
+                reply,
+            })
+            .await
+            .expect("a timeout is not an error here — that is the point");
+
+        assert_eq!(
+            settled,
+            Settled::TimedOut,
+            "a condition that did not happen is a fact about the session, \
+             not a failure of the call",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_wait_still_blames_the_compositor_when_the_loop_stops() {
+        // Held and never drained: the loop is wedged. Reporting `TimedOut` here
+        // would tell the caller their condition simply did not occur, when in
+        // fact nothing was ever looking for it.
+        let (commands, _receiver, _source) = bridge();
+
+        let failure = commands
+            .until(DEADLINE, |reply| Command::Wait {
+                condition: Watched::Windows(1),
+                reply,
+            })
+            .await
+            .expect_err("a stalled loop cannot answer a condition");
+
+        assert!(
+            matches!(failure, Failure::LoopStalled { .. }),
+            "a wait must not launder a stalled loop into a clean timeout: {failure:?}",
         );
     }
 

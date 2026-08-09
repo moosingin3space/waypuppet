@@ -44,3 +44,43 @@ fn a_client_connects_configures_and_commits() {
         harness.stop(client);
     });
 }
+
+#[test]
+fn a_connected_client_is_visible_as_one_until_it_leaves() {
+    fixture::guarded("handshake-connections", OUTPUT, |harness| {
+        assert_eq!(
+            harness.state().connections(),
+            0,
+            "nothing has connected yet",
+        );
+
+        let mut client = harness.start_client("handshake-connections");
+        harness.configure(&mut client);
+
+        // The only consumer is `ps`, which reports `Starting` until this is
+        // non-zero — so getting it wrong means a running application described
+        // as still starting up, forever. That is a wrong answer rather than a
+        // crash, which is exactly the kind that survives a test suite: the
+        // previous version counted from `ClientData::initialized`, which the
+        // backend this crate builds against never calls.
+        assert_eq!(
+            harness.state().connections(),
+            1,
+            "a client that has connected and been configured is connected",
+        );
+
+        harness.stop(client);
+        harness.drive_until("the client to be forgotten", |state| {
+            state.connections() == 0
+        });
+
+        // And having gone, it stays gone. A count that went negative here used
+        // to wrap to `usize::MAX`, which reads as "connected" ever after — the
+        // same bug pointing the other way.
+        assert_eq!(
+            harness.state().connections(),
+            0,
+            "a departed client must not leave anything behind",
+        );
+    });
+}

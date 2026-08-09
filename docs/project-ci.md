@@ -123,14 +123,14 @@ why it is a gating job rather than a nicety. It hosts `gtk3-widget-factory`, wai
 window, clicks, types, and requires the capture to *change*. Without a seat or without
 frame callbacks, that fails.
 
-Two known weaknesses, both deliberate:
+One known weakness, deliberate: **it asserts change, not content.** There is no OCR, so it
+cannot check that `hello` specifically appeared — only that driving the application did
+something. The captures are uploaded so a human can look.
 
-- **It asserts change, not content.** There is no OCR, so it cannot check that `hello`
-  specifically appeared — only that driving the application did something. The captures are
-  uploaded so a human can look.
-- **It polls `ps --json` for a mapped window** rather than blocking on a condition, because
-  `waypuppet wait` is [plan 05](../plans/05-wait.md). It becomes `wait --windows 1` when
-  that lands. Polling a protocol fact is still better than a fixed sleep.
+It contains no `sleep`. Since [plan 05](../plans/05-wait.md) it blocks on `wait --windows 1`
+and `wait --title .` instead of polling `ps --json` on a one-second timer, which made it
+both faster and exact. That is worth keeping true: a sleep appearing here would be the first
+sign that waypuppet had stopped being able to answer a question it should be able to answer.
 
 Running [example-app](../../example-app) itself remains the test that would most directly justify
 the project, and needs example-app built in the image. GTK is the cheap stand-in that catches

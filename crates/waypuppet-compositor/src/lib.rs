@@ -11,8 +11,9 @@
 //!
 //! [`probe`] reports what there is to render with. [`Compositor`] hosts a real
 //! toolkit: it composites `wl_shm` and `zwp_linux_dmabuf_v1` buffers offscreen,
-//! reads frames back as PNGs, and delivers keyboard and pointer input through
-//! the seat. `wait` and the accessibility tree are what remain; see `plans/`.
+//! reads frames back as PNGs, delivers keyboard and pointer input through the
+//! seat, and answers `wait` from its own bookkeeping rather than from a timer.
+//! The accessibility tree is what remains; see `plans/`.
 
 // Not `forbid`: `render` needs a narrowly scoped exception for smithay's
 // unsafe EGL constructors, and `forbid` cannot be overridden at all. The
@@ -38,7 +39,7 @@ use tokio::sync::oneshot;
 use waypuppet_proto::{Failure, Size};
 
 pub use crate::{
-    bridge::{Command, Commands, Heartbeat, Snapshot},
+    bridge::{Command, Commands, Heartbeat, Snapshot, Watched, Watching},
     render::{Frame, Renderer},
     state::State,
 };
@@ -194,8 +195,13 @@ impl Compositor {
         handle
             .insert_source(socket, |stream, (), state: &mut State| {
                 let data = std::sync::Arc::new(state.new_client_state());
-                if let Err(error) = state.display_handle.insert_client(stream, data) {
-                    tracing::warn!(%error, "could not add wayland client");
+                match state.display_handle.insert_client(stream, data) {
+                    // Here, rather than from `ClientData::initialized`: this is
+                    // the moment waypuppet itself accepts a client, so it is a
+                    // fact this crate owns. `initialized` is not called by the
+                    // backend `use_system_lib` selects — see `state::Clients`.
+                    Ok(client) => state.client_connected(client.id()),
+                    Err(error) => tracing::warn!(%error, "could not add wayland client"),
                 }
             })
             .map_err(|error| Error::Compositor(error.to_string()))?;
@@ -300,9 +306,13 @@ impl Compositor {
         // Clients throttle their drawing on frame callbacks, so this is what
         // lets a real toolkit draw more than its first frame.
         self.state.pace_frames();
-        // A caller that hit its settle timeout dropped its receiver; sweeping
-        // here is what keeps those entries from accumulating.
-        self.state.prune_settling();
+        // The one `wait` condition no event can announce: going quiet is the
+        // absence of commits, so only the loop can notice it. Everything else
+        // is answered where the fact changes.
+        self.state.check_idle();
+        // A caller that hit its timeout dropped its receiver; sweeping here is
+        // what keeps those entries from accumulating.
+        self.state.prune_parked();
         self.heartbeat.beat();
         Ok(())
     }
@@ -376,6 +386,11 @@ fn handle_command(state: &mut State, command: Command) {
             target,
             reply,
         } => settle(state, reply, |state| state.deliver_resize(size, target)),
+
+        // No events to deliver — only a fact to watch for. The reply is parked
+        // the same way, and the registry answers it from wherever that fact can
+        // change.
+        Command::Wait { condition, reply } => state.park_wait(condition, reply),
     }
 }
 

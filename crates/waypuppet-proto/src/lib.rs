@@ -112,14 +112,24 @@ pub enum Condition {
     /// At least this many windows are mapped.
     Windows(usize),
     /// A mapped window's title matches this regular expression.
+    ///
+    /// Mapped, not merely created: a title on a window nobody can see is not
+    /// what a caller waiting on one means.
     TitleMatches(String),
-    /// The target has committed this many further frames.
+    /// The focused window has committed this many further frames.
+    ///
+    /// Counted from the moment the request arrives, so it means "draw this many
+    /// more times", not "have drawn this many in total". Fails at once with
+    /// [`Failure::NoSuchWindow`] when there is no window yet — waiting for
+    /// frames from something that does not exist is a hang dressed up as a
+    /// condition, and [`Condition::Windows`] is what that caller wanted.
     Frames(u32),
     /// No client has committed a frame for this long.
     ///
     /// A heuristic, not a fact, and a trap for clients that repaint on a timer:
-    /// they are never idle. Prefer [`Condition::Frames`] where the caller knows
-    /// what they caused.
+    /// they are never idle. Prefer [`Condition::Windows`] or
+    /// [`Condition::TitleMatches`], which are facts about what the host
+    /// observed rather than about what it has not seen lately.
     Idle(Duration),
     /// The spawned client has exited.
     Exit,
@@ -246,6 +256,27 @@ pub enum Failure {
     /// The spawned client has exited, so there is nothing to drive.
     #[error("the client has exited")]
     ClientGone,
+    /// The session hosts no child process at all, so there is nothing that
+    /// could ever exit.
+    ///
+    /// Distinct from [`Failure::ClientGone`], which says a client was there and
+    /// is not any more. Collapsing the two would tell somebody whose
+    /// application never started that it had died.
+    #[error("this session hosts no client")]
+    NoClient,
+    /// A [`Condition::TitleMatches`] pattern is not a valid regular expression.
+    ///
+    /// Reported once, when the wait is parked, rather than being retried
+    /// against every window: a pattern that cannot compile will not compile
+    /// later either, and a caller who mistyped one wants to hear about it
+    /// immediately rather than at the timeout.
+    #[error("{pattern:?} is not a valid regular expression: {why}")]
+    BadPattern {
+        /// The pattern as the caller wrote it.
+        pattern: String,
+        /// What the regex engine objected to.
+        why: String,
+    },
     /// A key chord did not parse, or names something the keymap cannot produce.
     #[error("cannot produce {chord:?} with the active keymap")]
     UnmappableChord {
@@ -326,6 +357,13 @@ pub trait Waypuppet {
     /// The timeout is explicit rather than left to the call's deadline so that
     /// the outcome is a [`Settled`] value instead of a transport error. Set the
     /// deadline a little beyond it as a backstop.
+    ///
+    /// The condition is evaluated when the request arrives, so waiting for
+    /// something that is already true returns immediately rather than blocking
+    /// until it next changes. A [`Failure`] here is never "it did not happen" —
+    /// that is [`Settled::TimedOut`] — but something that makes the wait
+    /// pointless: a pattern that will not compile, or a window that has gone
+    /// away with the wait still counting its frames.
     async fn wait(condition: Condition, timeout: Duration) -> Result<Settled, Failure>;
 
     /// Fetch the accessibility tree the client publishes over AT-SPI.

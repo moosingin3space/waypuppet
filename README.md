@@ -5,14 +5,17 @@ from the command line.
 
 ```
 $ waypuppet run --detach -- ./target/debug/example-app-app
-session default: client connected, window 1 mapped "example-app", 2 frames
+session default started
 
+$ waypuppet wait --windows 1
 $ waypuppet type 'ls -la'
 $ waypuppet key Return
-$ waypuppet wait --idle 200ms
 $ waypuppet shot -o /tmp/after-ls.png
-/tmp/after-ls.png  1280x800
+/tmp/after-ls.png	1280x800
 ```
+
+No sleeps, and none needed: `wait` blocks until the compositor has seen the window, and
+`type` and `key` do not return until the application has drawn in response.
 
 ## The problem
 
@@ -110,7 +113,9 @@ drive a session too, but the command line is the product.
 | `waypuppet kill` | stop it |
 
 Mutating verbs settle before they return: `click` waits for the frame the click caused, so
-`click` followed by `shot` is correct without a sleep between them.
+`click` followed by `shot` is correct without a sleep between them. `wait` covers the rest —
+`--windows`, `--title`, `--frames`, `--idle` and `--exit`, each answered from something the
+compositor observed rather than from a timer.
 
 ## Status
 
@@ -124,18 +129,22 @@ everything it wrote — which is the failure this project was started over. Inpu
 `key`, `type`, `click`, `move`, `scroll` and `resize` deliver real events through the seat,
 and each one returns only once the client has drawn in response.
 
+`wait` blocks on facts rather than sleeps: `--windows`, `--title`, `--frames`, `--idle` and
+`--exit`. A condition that is already true returns immediately, so `run --detach` followed
+by `wait --windows 1` is safe whichever of the two wins the race. `--windows` and `--title`
+are the dependable ones; the other two come with caveats stated in `--help`, because frames
+arrive whether or not you caused them and an application with a spinner is never idle.
+
 Clients may draw through `wl_shm` or `zwp_linux_dmabuf_v1`, so anything Skia-backed —
 which renders through EGL — has somewhere to put its buffers.
 
-A real toolkit works end to end: GTK 3's `gtk3-widget-factory` is hosted, clicked into,
-typed at, and the text appears in the next capture with no sleep anywhere.
+A real toolkit works end to end: GTK 3's `gtk3-widget-factory` is hosted, waited for,
+clicked into, typed at, and the text appears in the next capture with no sleep anywhere.
 
 Every push is checked in a container with no GPU, which is the environment most users will
 run waypuppet in, and one job drives that GTK application end to end.
 
-**Not yet.** `wait`, the clipboard, and the accessibility tree. The transcript at the top
-of this file is still the design rather than a recording — `wait` is the part of it that
-does not work.
+**Not yet.** The clipboard and the accessibility tree.
 
 [CLAUDE.md] has the architecture, [plans/](plans/) has one file per phase with its status
 and what it taught us, and [docs/](docs/) covers using waypuppet in CI.

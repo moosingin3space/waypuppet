@@ -16,7 +16,7 @@ instead.
 | 02 | [Rendering and capture](02-rendering-and-capture.md) — a frame becomes a PNG | **done** |
 | 03 | [Control socket](03-control-socket.md) — `run`, `ps`, `shot`, `logs`, `kill` | mostly done |
 | 04 | [Input](04-input.md) — `key`, `type`, `click`, `move`, `scroll` | **done** |
-| 05 | [Wait](05-wait.md) — block on protocol facts, not on sleeps | not started |
+| 05 | [Wait](05-wait.md) — block on protocol facts, not on sleeps | **done** |
 | 06 | [Clipboard and resize](06-clipboard-and-resize.md) — what a terminal exercises | not started |
 | 07 | [Accessibility tree](07-accessibility-tree.md) — semantic selectors | not started |
 | 08 | [Sandbox autonomy](08-sandbox-autonomy.md) — the caller never types `flatpak run` | not started |
@@ -27,12 +27,16 @@ screenshotted and stopped. What is left of them is listed in each plan's "Still 
 04 has landed as well: input goes through the seat and every mutating verb settles on the
 client's next frame, which is what makes `click` followed by `shot` correct with nothing in
 between. It is verified against GTK 3 rather than only against waypuppet's own fixture,
-which is what turned up the two things the fixture was too well-behaved to catch. 05 is what remains of making waypuppet trustworthy rather than merely possible —
-waiting on facts instead of sleeping, reusing the parked-sender machinery 04 built. 06 and
-07 are driven by
-[example-app](../../example-app) specifically. 08 is numbered last but not ranked last: it only
-needs 03, and it is what decides whether waypuppet is pleasant to reach for or a thing you
-have to remember how to set up.
+which is what turned up the two things the fixture was too well-behaved to catch.
+
+05 has landed on top of it, reusing that parked-sender machinery for conditions rather than
+frames. Between them they are what makes waypuppet trustworthy rather than merely possible:
+there is now no sleep used for synchronisation anywhere in the project, including in the
+smoke test that drives a real GTK application.
+
+06 and 07 are driven by [example-app](../../example-app) specifically. 08 is numbered last but not
+ranked last: it only needs 03, and it is what decides whether waypuppet is pleasant to reach
+for or a thing you have to remember how to set up.
 
 `zwp_linux_dmabuf_v1` has landed, so a client that renders through EGL now has somewhere
 to put its buffers and a real toolkit can be tried. What is left in

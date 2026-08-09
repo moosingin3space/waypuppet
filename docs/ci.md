@@ -3,12 +3,11 @@
 How to run your GUI application's tests on a machine with no screen, no desktop session and
 — usually — no GPU.
 
-> **Status:** mostly real. `doctor`, `run`, `ps`, `shot`, `logs`, `kill`, `sessions` and
-> every input verb — `key`, `type`, `click`, `move`, `scroll`, `resize` — work today, and
-> are exercised against a real GTK application on every push. **`wait` does not exist yet**
-> ([plan 05](../plans/05-wait.md)), so the example below does not run as written; until it
-> lands, poll `waypuppet ps --json` for a mapped window, the way
-> [`ci/toolkit-smoke.sh`](../ci/toolkit-smoke.sh) does. Everything else here is real.
+> **Status:** real, apart from `tree`. `doctor`, `run`, `ps`, `shot`, `logs`, `kill`,
+> `sessions`, `wait` and every input verb — `key`, `type`, `click`, `move`, `scroll`,
+> `resize` — work today, and are exercised against a real GTK application on every push by
+> [`ci/toolkit-smoke.sh`](../ci/toolkit-smoke.sh), which runs the example below almost
+> verbatim. The accessibility tree is [plan 07](../plans/07-accessibility-tree.md).
 
 ## What CI has to provide
 
@@ -44,6 +43,24 @@ No sleeps. `wait` blocks on facts the compositor observed, and the input verbs d
 return until the application has drawn the result, so `key` followed by `shot` captures the
 frame the key press caused.
 
+### Which condition to wait on
+
+| | Reliable? | |
+|---|---|---|
+| `--windows N` | yes | at least N windows are mapped. What to use after `run --detach`. |
+| `--title RE` | yes | a *mapped* window's title matches a regular expression. Anchor it — `'^Files$'` — when the application has more than one window. |
+| `--frames N` | with care | the focused window drew N more times. Frames arrive whether or not you caused them, so this means "it drew again", not "your change is on screen". Fails immediately if no window exists yet. |
+| `--idle MS` | rarely | nothing has drawn for MS milliseconds. A heuristic, and a trap: anything with a spinner, an animation or a blinking cursor is *never* idle, so this never fires. |
+| `--exit` | yes | the spawned client has exited. |
+
+Reach for `--windows` and `--title`. They are facts about what the compositor observed;
+the other two are facts about what it has not seen lately, which is a weaker thing.
+
+The condition is evaluated when the request arrives, so `wait` for something that has
+already happened returns immediately rather than blocking until it next changes. That is
+what makes `run --detach` followed by `wait --windows 1` safe: it does not matter which of
+the two wins the race.
+
 ## GitHub Actions
 
 ```yaml
@@ -75,8 +92,8 @@ GitHub-hosted runners have no render node, so CI will use llvmpipe. Two conseque
 **It is slower** — several times slower for a large window. Timeouts tuned on a laptop with
 a GPU will be tight or flaky in CI. Prefer waiting on conditions over raising timeouts —
 though note that the mutating verbs already settle on the client's next frame before they
-return, so the common case needs no wait at all. `wait --frames 1` will be the tool for the
-rest, once it exists.
+return, so the common case needs no wait at all. `wait --windows` and `wait --title` are
+the tools for the rest.
 
 **It produces different pixels.** Antialiasing and filtering differ between llvmpipe and any
 GPU driver, so a screenshot taken on your machine will not be byte-identical to one taken in
@@ -135,11 +152,25 @@ socket and graphics buffers, so they have to be in the same namespace.
 | 0 | success |
 | 1 | the operation failed — read stderr |
 | 2 | usage error |
+| 3 | `wait` only: the condition did not hold before the timeout |
 
 With one deliberate exception: **`waypuppet run` without `--detach` exits with the *child's*
 status**, so a session composes with anything that already checks exit codes. A test script
 that runs its application under waypuppet gets the application's answer, not waypuppet's.
 
-`wait` timing out is a failure, not a crash, and says which condition did not hold. A
-failure that names a stalled compositor loop is a waypuppet bug, not yours — see
+3 is not a failure, which is why it is not 1. "The condition did not hold" is an outcome a
+script may well be expecting — `waypuppet wait --exit --timeout 100` is a perfectly good way
+to ask whether the application is still running — and it has to be distinguishable from
+waypuppet being unable to answer at all:
+
+```bash
+waypuppet wait --title '^Save changes' --timeout 2000
+case $? in
+    0) waypuppet key Return ;;       # the dialog appeared
+    3) echo "no dialog, carrying on" ;;
+    *) exit 1 ;;                     # something is actually wrong
+esac
+```
+
+A failure that names a stalled compositor loop is a waypuppet bug, not yours — see
 [CLAUDE.md](../CLAUDE.md).
