@@ -1,7 +1,6 @@
 # 07 — Accessibility tree
 
-**Status:** spiked, not implemented. The approach is confirmed to work; what remains is a
-decision about where the bus comes from — see "What the spike found".
+**Status:** done, except selectors — see "Still to do"
 **Depends on:** [06](06-clipboard-and-resize.md), which has landed
 
 ## Goal
@@ -140,6 +139,67 @@ easiest to reach for:
 
 The spike does not settle this, and should not — it settles that the *registry* half works,
 which was the uncertain part. All three options sit behind the same registry.
+
+## What it turned out to be
+
+`crates/waypuppet-compositor/src/a11y.rs`, and `waypuppet tree`. Against
+`gtk3-widget-factory` it reads 261 nodes with roles, names and bounds:
+
+```
+application "gtk3-widget-factory"
+  frame  [0,0 1408x784]
+    panel  [26,23 1356x47]
+      button "Minimize"  [1262,31 34x30]
+```
+
+**The bus is a daemon where there is one and `busd` where there is not**, which is the
+decision the spike left open, taken deliberately. `dbus-daemon` is the reference
+implementation and is present in most images that can run a GUI application, so using it
+means waypuppet is not also on the hook for being a correct message bus; `busd` describes
+itself as alpha, so it is the fallback rather than the default — and it is what makes this
+work inside the Flatpak SDK, which ships no bus of any kind. Both paths are exercised: CI
+takes the daemon, `just test` in the SDK takes the embedded one.
+
+`dbus-daemon` is started with a configuration file of waypuppet's own rather than
+`--session`. The stock session configuration is a separate package from the binary and is
+missing from plenty of images that have one; writing three lines is cheaper than depending
+on somebody else's file, and it lets the policy say what is actually true here — one
+client, everything allowed. `--print-address` doubles as the readiness signal, so there is
+no polling and no sleep.
+
+**The landmine the spike found is now a test that fails on it.** `tests/tree.rs`
+deserialises the `Embed` reply as `atspi::ObjectRefOwned` — the same type a real client
+uses — because that is the only thing that catches a well-known name coming back. This was
+verified by reintroducing the bug: with a looser `(String, OwnedObjectPath)` the test
+passed against it, which is precisely the trap, and with the faithful type it fails. Worth
+noting that the first version of the test had exactly the bug its own module docs claimed
+to guard against.
+
+**`tree` never touches the compositor.** It is answered entirely on the control thread, the
+same split as `wait --exit`: the tree is the application describing itself over a bus this
+side owns, and the compositor has never heard of D-Bus. No bridge command was needed.
+
+**Nodes that are nowhere report nowhere.** GTK answers `i32::MIN` corners with a nominal
+size for anything not laid out — every collapsed menu item, of which there are many.
+Passing that through as a rectangle would be worse than passing nothing, because
+`click --at` would accept it and it points nowhere.
+
+**Both new failure variants are about telling apart two things that look alike.**
+`NoTree` means nothing registered, which is the ordinary answer for a toolkit that
+publishes no tree; `Tree` means there was one and reading it went wrong. A session whose
+bus could not start serves the whole protocol and says so at startup, which is the bargain
+the renderer already makes.
+
+## Still to do
+
+**Selectors.** `click --on 'button[name="Reconnect"]'` does not exist. This plan said to
+add them "only once the tree is real, and shape the selector syntax around what the tree
+actually contains" — that condition is now met, and the tree contains role, name and
+bounds, so a selector over those three is the obvious shape. Deliberately not guessed at
+here.
+
+The other thing left is checking this against `example-app-app` rather than GTK, which
+[08](08-sandbox-autonomy.md) gates.
 
 ## Protocol additions
 

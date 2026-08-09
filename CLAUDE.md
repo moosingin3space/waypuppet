@@ -41,6 +41,7 @@ crates/
     src/render.rs        #   EGL, offscreen compositing, readback, PNG
     src/bridge.rs        #   commands, deadlines, the heartbeat
     src/session.rs       #   compositor thread, child process, RPC server
+    src/a11y.rs          #   the private D-Bus session, and the AT-SPI registry
   waypuppet              # the `waypuppet` binary: `serve`, plus every client verb.
 ```
 
@@ -176,6 +177,33 @@ with a `Compositor(Watched)` arm and an `Exit` arm, so neither half is ever hand
 condition it cannot see. The first draft passed all five conditions to the compositor and
 needed a "cannot happen" arm — and an arm that cannot happen is an arm that answers wrongly
 when it does.
+
+### waypuppet is the accessibility registry too
+
+The same reasoning that makes waypuppet a compositor makes it an AT-SPI registry. An
+application publishes its tree by registering with whatever owns `org.a11y.atspi.Registry`;
+if that is waypuppet, the tree arrives without anything else on the bus and without the
+application ever touching the developer's desktop.
+
+The bus underneath is a `dbus-daemon` where the image has one and an embedded `busd` where
+it does not. That order is deliberate: `dbus-daemon` is the reference implementation and is
+in most images that can run a GUI application, so preferring it means waypuppet is not also
+on the hook for being a correct message bus. `busd` calls itself alpha, so it is the
+fallback — and it is what makes this work in the Flatpak SDK, which has no bus at all.
+`dbus-daemon` gets a config file of waypuppet's own rather than `--session`, because the
+stock session config is a separate package from the binary and is often missing.
+
+**The failure mode here has no symptom, which shapes the tests.** If the `Embed` reply
+carries a well-known bus name instead of a unique one, `atspi` cannot decode it, the failure
+is swallowed as recoverable, and the application registers successfully and then publishes
+nothing — silently, on both sides. So `tests/tree.rs` reads a node out rather than checking
+the handshake happened, and it deserialises the reply with the same type a real client uses,
+because a looser one accepts the bug. The first version of that test had exactly the defect
+its own docs claimed to guard against; it was caught by reintroducing the bug and watching
+the test pass.
+
+`tree` is answered entirely on the control thread. The compositor has never heard of D-Bus
+and does not need to — the same split as `wait --exit`.
 
 ### A transfer is an event source, not a read
 
@@ -453,10 +481,15 @@ rather than guessing at it; a sleep standing in for a condition is a bug.
 CI runs on every push — see [`docs/project-ci.md`](docs/project-ci.md). `just ci` runs the
 same thing locally, in the same image, so "will CI agree?" does not need a push to answer.
 
-Not yet: the accessibility tree. [Plan 07](plans/07-accessibility-tree.md) has been spiked
-and works — an AccessKit application activates against a bus carrying only the two names
-waypuppet would own, and a throwaway registry read its whole tree back. What is left is a
-choice about where the D-Bus session comes from, which that plan sets out.
+`waypuppet tree` prints the accessibility tree: waypuppet runs a private D-Bus session and
+is the AT-SPI registry on it, so an application registers against waypuppet rather than
+against the developer's desktop. 261 nodes out of `gtk3-widget-factory`, with roles, names
+and bounds in the coordinates `click --at` takes.
+
+Not yet: selectors — `click --on 'button[name="Save"]'` — which
+[plan 07](plans/07-accessibility-tree.md) deferred until the tree was real enough to shape
+them around. And [plan 08](plans/08-sandbox-autonomy.md), which is what would let any of
+this be pointed at [example-app](../example-app) rather than at GTK.
 
 **The roadmap lives in [`plans/`](plans/)** — one file per phase, in the order they should
 land, each with its own acceptance criteria and, once landed, what it taught us.

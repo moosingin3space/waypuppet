@@ -13,12 +13,15 @@
 //! toolkit: it composites `wl_shm` and `zwp_linux_dmabuf_v1` buffers offscreen,
 //! reads frames back as PNGs, delivers keyboard and pointer input through the
 //! seat, and answers `wait` from its own bookkeeping rather than from a timer.
-//! The accessibility tree is what remains; see `plans/`.
+//! [`a11y`] adds the other half of the sense: waypuppet runs the session's
+//! D-Bus and is the AT-SPI registry on it, so an application publishes its
+//! widget tree here rather than to somebody's desktop.
 
 // Not `forbid`: `render` needs a narrowly scoped exception for smithay's
 // unsafe EGL constructors, and `forbid` cannot be overridden at all. The
 // workspace still denies it, so every use has to be justified in place.
 
+pub mod a11y;
 pub mod bridge;
 pub mod input;
 mod render;

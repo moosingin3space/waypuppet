@@ -71,14 +71,22 @@ can read that tree and hand it back:
 
 ```
 $ waypuppet tree
-window "example-app"
-  ├─ terminal "session 1"  0,0 1280x760
-  └─ statusbar             0,760 1280x40
-     └─ button "Reconnect" 1180,768 88x24
+application "gtk3-widget-factory"
+  frame  [0,0 1408x784]
+    panel  [26,23 1356x47]
+      button "Minimize"  [1262,31 34x30]
+      button "Maximize"  [1302,31 34x30]
+      button "Close"  [1342,31 34x30]
 ```
 
-Which turns `click --at 1224,780` — a magic number that breaks the moment the layout
-changes — into something that says what it means.
+Bounds come back in the same coordinates `click --at` takes, so a widget you can name is a
+widget you can click. It needs no D-Bus on your machine: waypuppet runs the session's bus
+and is the accessibility registry on it, so the application registers with waypuppet rather
+than announcing itself to your desktop.
+
+The remaining step is selectors — turning `click --at 1224,780`, a magic number that breaks
+the moment the layout changes, into something that says what it means. That is not built
+yet.
 
 ## Where it runs
 
@@ -151,9 +159,14 @@ clicked into, typed at, and the text appears in the next capture with no sleep a
 Every push is checked in a container with no GPU, which is the environment most users will
 run waypuppet in, and one job drives that GTK application end to end.
 
-**Not yet.** The accessibility tree, which is [plan 07](plans/07-accessibility-tree.md).
-The mechanism has been proven — an AccessKit application publishes its tree to waypuppet
-over a private bus — but it is not wired up.
+`waypuppet tree` prints the accessibility tree — roles, names and bounds, in the same
+coordinates `click --at` takes. waypuppet runs a private D-Bus session and is the AT-SPI
+registry on it, so the application registers with waypuppet rather than announcing itself
+to your desktop, and none of it needs a bus on the host. It reads 261 nodes out of
+`gtk3-widget-factory`.
+
+**Not yet.** Selectors — `click --on 'button[name="Save"]'` — so a test can name a widget
+instead of a coordinate. The tree is there; the shorthand for pointing at it is not.
 
 [CLAUDE.md] has the architecture, [plans/](plans/) has one file per phase with its status
 and what it taught us, and [docs/](docs/) covers using waypuppet in CI.

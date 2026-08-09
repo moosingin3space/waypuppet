@@ -24,6 +24,16 @@ regex = "1"
 # compositor thread is the one thing that must never happen. Already in the tree via
 # calloop and smithay, and a safe wrapper rather than a raw libc call.
 rustix = { version = "1", features = ["fs"] }
+
+# The accessibility tree arrives over AT-SPI, which is D-Bus. `atspi` is the protocol's
+# own crate: its typed proxies mean the method signatures are checked rather than
+# hand-written, which matters here because a mistyped one fails by returning nothing
+# rather than by failing — see plan 07.
+atspi = { version = "0.29", default-features = false, features = ["proxies", "tokio"] }
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+# The fallback bus, for images with no daemon of their own — the Flatpak SDK among them.
+# Alpha, and only reached when there is no alternative; see `a11y::Provider`.
+busd = { version = "0.5", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

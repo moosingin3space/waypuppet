@@ -19,6 +19,9 @@ futures.workspace = true
 png.workspace = true
 regex.workspace = true
 rustix.workspace = true
+atspi.workspace = true
+zbus.workspace = true
+busd.workspace = true
 tarpc.workspace = true
 tokio.workspace = true
 # Feature selection, and the reasoning behind it, lives on the workspace dependency.
@@ -77,3 +80,7 @@ path = "tests/clipboard.rs"
 [[test]]
 name = "resize"
 path = "tests/resize.rs"
+
+[[test]]
+name = "tree"
+path = "tests/tree.rs"

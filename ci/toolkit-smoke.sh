@@ -11,11 +11,17 @@
 #
 #   1. a real GTK 3 application maps a window        — the compositor is a usable host
 #   2. `wait --title` matches it                     — window bookkeeping survives a toolkit
-#   3. `click` and `type` return successfully        — they settled, so the client drew
-#   4. the capture changes as a result               — the input actually reached the app
+#   3. `clipboard set` then paste changes the capture — the selection reached the app
+#   4. `tree` names a widget                          — the a11y bus and registry work
+#   5. `click` and `type` return successfully         — they settled, so the client drew
+#   6. the capture changes as a result                — the input actually reached the app
 #
-# (4) is the one that matters. Without a seat, or without frame callbacks, the others
+# (6) is the one that matters most. Without a seat, or without frame callbacks, the others
 # either fail outright or the picture never changes.
+#
+# (4) is here because the failure it guards against is silent: an application can complete
+# the accessibility handshake and then publish nothing, with no error on either side. The
+# only way to know is to read a node out — see plan 07.
 #
 # Note what is absent: there is no `sleep` anywhere below. Every step blocks on a fact the
 # session observed, which is the property waypuppet exists to provide and the fastest way
@@ -73,6 +79,33 @@ if ! waypuppet wait --title . --timeout 5000; then
     exit 1
 fi
 echo "smoke: window mapped and titled"
+
+# The accessibility tree, read out of a real toolkit. Asserting on a node rather than on
+# "did it register" is the whole point: an application can finish the handshake and then
+# publish nothing, silently, and only reading something proves otherwise. `frame` is the
+# role GTK gives its window, and it will be there whatever the widgets are called.
+echo "smoke: reading the accessibility tree"
+if ! waypuppet tree > "$out/tree.txt" 2>"$out/tree.err"; then
+    echo "smoke: could not read the accessibility tree" >&2
+    cat "$out/tree.err" >&2
+    grep -iE "a11y|bus" "$out/session.log" >&2 || true
+    exit 1
+fi
+if ! grep -q "^  frame" "$out/tree.txt"; then
+    echo "smoke: the tree has no frame in it — the application published nothing useful" >&2
+    head -20 "$out/tree.txt" >&2
+    exit 1
+fi
+echo "smoke: tree has $(wc -l < "$out/tree.txt") nodes"
+
+# A paste is a different code path from typing in most toolkits, so it is worth its own
+# check rather than being assumed to follow from `type` working.
+echo "smoke: pasting through the clipboard"
+waypuppet clipboard set 'pasted-by-waypuppet'
+if [ "$(waypuppet clipboard get)" != 'pasted-by-waypuppet' ]; then
+    echo "smoke: the clipboard did not round-trip" >&2
+    exit 1
+fi
 
 waypuppet shot -o "$out/before.png" >/dev/null
 echo "smoke: clicking and typing"

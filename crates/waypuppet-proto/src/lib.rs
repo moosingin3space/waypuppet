@@ -249,9 +249,14 @@ pub struct LogChunk {
 }
 
 /// A node in the accessibility tree the client publishes.
+///
+/// Concrete rather than a free-form value on purpose: bincode is not
+/// self-describing, so a `serde_json::Value` cannot round-trip through the
+/// transport. Expect this to grow as AT-SPI turns out to carry more worth
+/// having, and treat that as the normal case rather than a design failure.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Node {
-    /// The AT-SPI role, such as `push_button` or `terminal`.
+    /// The AT-SPI role, such as `push button` or `terminal`.
     pub role: String,
     /// The accessible name, where the widget has one.
     pub name: Option<String>,
@@ -305,6 +310,16 @@ pub enum Failure {
     /// Rendering or writing the capture failed.
     #[error("capture failed: {0}")]
     Capture(String),
+    /// No application has published an accessibility tree.
+    ///
+    /// The ordinary answer for a toolkit that does not publish one, or for one
+    /// that has not finished starting. Distinct from [`Failure::Tree`], which
+    /// means there was a tree and reading it went wrong.
+    #[error("no application has registered an accessibility tree")]
+    NoTree,
+    /// The accessibility tree could not be read.
+    #[error("cannot read the accessibility tree: {0}")]
+    Tree(String),
     /// A selection could not be read or written.
     ///
     /// Transfers are fd-based and cooperative: the other side may offer a type

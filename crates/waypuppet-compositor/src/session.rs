@@ -35,7 +35,7 @@ use waypuppet_proto::{
     SessionStatus, Settled, Size, Target, Waypuppet,
 };
 
-use crate::{Command, Commands, Compositor, Config, Error, Watching};
+use crate::{Command, Commands, Compositor, Config, Error, Watching, a11y, a11y::Accessibility};
 
 /// How long the server waits for the compositor to answer a command.
 ///
@@ -71,6 +71,12 @@ pub fn socket_path(name: &str) -> Result<PathBuf, Error> {
 /// Everything the RPC handlers share.
 struct Inner {
     commands: Commands,
+    /// The accessibility bus and registry, or why there is not one.
+    ///
+    /// A session whose bus could not start still serves the whole protocol; it
+    /// reports that at startup rather than at the first `tree`, which is the
+    /// same bargain the renderer makes.
+    a11y: Result<Accessibility, String>,
     capture_dir: PathBuf,
     /// Counts captures, so unnamed ones get distinct file names.
     captures: AtomicU64,
@@ -158,8 +164,19 @@ pub async fn serve(
                 Error::Compositor("the compositor thread never reported ready".to_owned())
             })??;
 
+    // Before the child, always: an application looks for the accessibility bus
+    // as it starts, and one that appears afterwards may as well not exist.
+    let a11y = match a11y::runtime_dir() {
+        Ok(directory) => Accessibility::start(&directory).await,
+        Err(why) => Err(why),
+    };
+    if let Err(why) = &a11y {
+        tracing::warn!(%why, "no accessibility bus: `tree` will not work");
+    }
+
     let inner = Arc::new(Inner {
         commands,
+        a11y,
         capture_dir: config.capture_dir.clone(),
         captures: AtomicU64::new(0),
         client: Mutex::new(Life::default()),
@@ -171,6 +188,8 @@ pub async fn serve(
     if !argv.is_empty() {
         spawn_child(&inner, argv, &wayland_display, exit_with_child)?;
     }
+    // Dropped before the compositor thread is joined, so the bus and any
+    // daemon behind it go with the session rather than outliving it.
 
     let result = accept(&inner, socket).await;
 
@@ -250,13 +269,26 @@ fn spawn_child(
         .env("WAYLAND_DISPLAY", wayland_display)
         // Never inherit these: a client that picked up the caller's real
         // desktop would open a window there and look like it had worked, which
-        // is the worst available failure.
+        // is the worst available failure. The same reasoning covers the bus —
+        // an application that found the developer's session would announce
+        // itself to their actual desktop.
         .env_remove("DISPLAY")
+        .env_remove("DBUS_SESSION_BUS_ADDRESS")
+        .env_remove("AT_SPI_BUS_ADDRESS")
         .stdin(Stdio::null())
         // Captured rather than inherited. Losing the client's last words is
         // precisely the failure waypuppet exists to fix.
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+
+    // Both variables, not just the session one. `AT_SPI_BUS_ADDRESS` is checked
+    // first by every implementation that reads it, which saves a lookup and —
+    // more usefully — means one bus can do both jobs.
+    if let Ok(a11y) = &inner.a11y {
+        command
+            .env("DBUS_SESSION_BUS_ADDRESS", a11y.address())
+            .env("AT_SPI_BUS_ADDRESS", a11y.address());
+    }
 
     let mut child = command
         .spawn()
@@ -635,14 +667,15 @@ impl Waypuppet for Server {
             .await?
     }
 
+    // Answered entirely on this thread. The compositor has never heard of
+    // D-Bus and does not need to: the tree is the application describing
+    // itself, over a bus this side owns — the same split as `wait --exit`.
     async fn tree(self, _: Context, _target: Target) -> Result<Node, Failure> {
-        Err(unimplemented("tree"))
+        match &self.0.a11y {
+            Ok(a11y) => a11y.tree().await,
+            Err(why) => Err(Failure::Tree(why.clone())),
+        }
     }
-}
-
-/// The verbs later phases will fill in.
-fn unimplemented(verb: &str) -> Failure {
-    Failure::Unimplemented(format!("{verb} lands with a later phase; see plans/"))
 }
 
 /// How long a call has left before its deadline.

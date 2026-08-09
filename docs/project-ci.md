@@ -123,9 +123,11 @@ why it is a gating job rather than a nicety. It hosts `gtk3-widget-factory`, wai
 window, clicks, types, and requires the capture to *change*. Without a seat or without
 frame callbacks, that fails.
 
-One known weakness, deliberate: **it asserts change, not content.** There is no OCR, so it
-cannot check that `hello` specifically appeared — only that driving the application did
-something. The captures are uploaded so a human can look.
+One known weakness, deliberate: **the pixel check asserts change, not content.** There is
+no OCR, so it cannot check that `hello` specifically appeared — only that driving the
+application did something. The captures are uploaded so a human can look. The accessibility
+assertion is the opposite and makes up for some of it: it requires a named `frame` node to
+come back out of GTK, which is content rather than change.
 
 It contains no `sleep`. Since [plan 05](../plans/05-wait.md) it blocks on `wait --windows 1`
 and `wait --title .` instead of polling `ps --json` on a one-second timer, which made it

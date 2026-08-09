@@ -3,11 +3,10 @@
 How to run your GUI application's tests on a machine with no screen, no desktop session and
 — usually — no GPU.
 
-> **Status:** real, apart from `tree`. `doctor`, `run`, `ps`, `shot`, `logs`, `kill`,
-> `sessions`, `wait`, `clipboard` and every input verb — `key`, `type`, `click`, `move`,
-> `scroll`, `resize` — work today, and are exercised against a real GTK application on
-> every push by [`ci/toolkit-smoke.sh`](../ci/toolkit-smoke.sh), which runs the example
-> below almost verbatim. The accessibility tree is
+> **Status:** real. Every verb here works today and is exercised against a real GTK
+> application on every push by [`ci/toolkit-smoke.sh`](../ci/toolkit-smoke.sh), which runs
+> the examples below almost verbatim. The one thing still missing is selectors, so `tree`
+> prints the widget tree but `click` still takes coordinates —
 > [plan 07](../plans/07-accessibility-tree.md).
 
 ## What CI has to provide
@@ -157,9 +156,19 @@ everything that affects rasterisation is pinned:
   across driver updates. A small per-pixel tolerance with a failure threshold on the
   proportion of differing pixels is the usual compromise.
 
-Where the accessibility tree covers what you are checking, prefer it. `waypuppet tree`
-returns roles, names and bounds, and asserting that a button named "Save" exists at a
-sensible position is both more robust and more legible than diffing pixels.
+Where the accessibility tree covers what you are checking, prefer it — it is immune to
+every rasterisation difference above:
+
+```bash
+waypuppet tree --json | jq -e '.. | select(.role? == "button" and .name? == "Save")'
+```
+
+`waypuppet tree` returns roles, names and bounds, and asserting that a button named "Save"
+exists at a sensible position is both more robust and more legible than diffing pixels. It
+needs no D-Bus on the host: waypuppet runs a private session bus and acts as the
+accessibility registry itself, so the application registers with waypuppet and nothing
+leaks onto a developer's desktop. Toolkits built on AccessKit publish a tree without being
+asked; GTK does too.
 
 ## Getting waypuppet into your image
 

@@ -6,11 +6,12 @@
 //!
 //! # Status
 //!
-//! `doctor`, `serve`, `run`, `ps`, `shot`, `logs`, `kill`, `sessions`, `wait`
-//! and every input verb — `key`, `type`, `click`, `move`, `scroll`, `resize` —
-//! work. `tree` is declared and fails with a message pointing at `plans/`, so
-//! `--help` shows the whole designed surface rather than only the finished
-//! part — the shape is the thing being committed to.
+//! Every verb works: `doctor`, `serve`, `run`, `ps`, `shot`, `logs`, `kill`,
+//! `sessions`, `wait`, `clipboard`, `tree`, and the input verbs `key`, `type`,
+//! `click`, `move`, `scroll` and `resize`.
+//!
+//! What is left is selectors — naming a widget from the accessibility tree
+//! instead of a coordinate — which is the rest of `plans/07`.
 
 mod client;
 
@@ -396,12 +397,7 @@ async fn dispatch(cli: Cli) -> ExitCode {
         Command::Resize { size, window } => resize(&socket, &size, window).await,
         Command::Wait { condition, timeout } => wait(&socket, condition, timeout, cli.json).await,
         Command::Clipboard { action } => clipboard(&socket, action).await,
-        // The last of them. `--help` still shows the whole designed surface
-        // rather than only the finished part, because the shape is the thing
-        // being committed to.
-        Command::Tree => {
-            Err("`tree` is designed but not implemented yet — see plans/07".to_owned())
-        }
+        Command::Tree => tree(&socket, cli.json).await,
     };
 
     match outcome {
@@ -783,6 +779,49 @@ async fn clipboard(socket: &Path, action: ClipboardAction) -> Result<ExitCode, S
     }
 
     Ok(ExitCode::SUCCESS)
+}
+
+/// Print the application's accessibility tree.
+async fn tree(socket: &Path, json: bool) -> Result<ExitCode, String> {
+    let session = client::connect(socket).await?;
+    let root = session
+        .tree(client::deadline(client::DEADLINE), Target::Focused)
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|failure| failure.to_string())?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&root).map_err(|error| error.to_string())?
+        );
+    } else {
+        print_node(&root, 0);
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// One node and its children, indented.
+///
+/// Bounds are printed in the same coordinates `click --at` takes, which is the
+/// whole point of having them: a selector that resolves to a rectangle should
+/// be one `--at` away from being clicked.
+fn print_node(node: &waypuppet_proto::Node, depth: usize) {
+    let indent = "  ".repeat(depth);
+    let name = node
+        .name
+        .as_ref()
+        .map_or_else(String::new, |name| format!(" {name:?}"));
+    let bounds = node.bounds.as_ref().map_or_else(String::new, |bounds| {
+        format!(
+            "  [{},{} {}x{}]",
+            bounds.origin.x, bounds.origin.y, bounds.size.width, bounds.size.height
+        )
+    });
+    println!("{indent}{}{name}{bounds}", node.role);
+    for child in &node.children {
+        print_node(child, depth + 1);
+    }
 }
 
 /// Everything on stdin, for `clipboard set --stdin`.

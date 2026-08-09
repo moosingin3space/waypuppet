@@ -18,7 +18,7 @@ instead.
 | 04 | [Input](04-input.md) — `key`, `type`, `click`, `move`, `scroll` | **done** |
 | 05 | [Wait](05-wait.md) — block on protocol facts, not on sleeps | **done** |
 | 06 | [Clipboard and resize](06-clipboard-and-resize.md) — what a terminal exercises | **done** |
-| 07 | [Accessibility tree](07-accessibility-tree.md) — semantic selectors | spiked |
+| 07 | [Accessibility tree](07-accessibility-tree.md) — semantic selectors | **done**, bar selectors |
 | 08 | [Sandbox autonomy](08-sandbox-autonomy.md) — the caller never types `flatpak run` | not started |
 
 Phases 01–03 were the spine, and they have landed: a session can be started, hosted,
@@ -37,11 +37,12 @@ smoke test that drives a real GTK application.
 06 has landed too: both selections move in both directions, over pipes driven by the event
 loop rather than read inline, and a window can now be smaller than the output.
 
-07 is **spiked but not implemented**, which is what its own plan asked for. The uncertain
-part is settled — an AccessKit application does come up against a bus carrying only the two
-names waypuppet would own, and a ninety-line throwaway registry read its whole tree back.
-What is left is a deliberate choice about where the bus comes from, and the plan sets out
-the three options. It is a decision, not a discovery.
+07 has landed too. waypuppet runs a private D-Bus session and *is* the accessibility
+registry on it, so `waypuppet tree` reads 261 nodes out of `gtk3-widget-factory` with roles,
+names and bounds. The bus is a `dbus-daemon` where the image has one and an embedded `busd`
+where it does not, which covers both CI and the Flatpak SDK. What is left of it is
+selectors — `click --on 'button[name="Save"]'` — which that plan deliberately deferred until
+the tree was real enough to shape them around.
 
 08 is numbered last but not ranked last: it only needs 03, and it is what decides whether
 waypuppet is pleasant to reach for or a thing you have to remember how to set up. It is now
