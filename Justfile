@@ -39,7 +39,16 @@ sandbox_args := "--user --devel --share=network --share=ipc --device=dri" \
     + " --env=MISE_TRUSTED_CONFIG_PATHS=" + justfile_directory() \
     + " --env=CARGO_TARGET_DIR=target/flatpak"
 
-sandbox_prelude := "export PATH=" + brew_prefix / "bin" + ":$PATH; cd " + justfile_directory() + ";"
+# mise is invoked by absolute path rather than by putting brew's bin on PATH.
+#
+# That prepend used to be here, and it reached further than intended: `just cli run -- app`
+# spawns the application under test as a descendant of this shell, so the application
+# inherited it too. A GTK client started that way rendered every glyph as a box — text
+# silently unreadable, no warning anywhere — while the same binary launched from a plain
+# SDK shell rendered normally. Since the only thing here that needs brew is mise, naming it
+# outright keeps the toolchain out of the environment the application under test sees.
+sandbox_prelude := "cd " + justfile_directory() + ";"
+mise := brew_prefix / "bin/mise"
 
 # Default recipe: list everything.
 default:
@@ -54,7 +63,7 @@ setup:
 [private]
 sdk +cmd:
     flatpak run {{ sandbox_args }} --command=sh {{ sdk }} \
-        -c '{{ sandbox_prelude }} mise exec -- {{ cmd }}'
+        -c '{{ sandbox_prelude }} {{ mise }} exec -- {{ cmd }}'
 
 # Build the workspace.
 build: (sdk "cargo build --workspace")
