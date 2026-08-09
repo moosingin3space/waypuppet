@@ -33,12 +33,16 @@ fn a_committed_frame_is_captured_in_software() {
 }
 
 fn committed_frame(name: &'static str, rendering: waypuppet_compositor::Rendering) {
-    let wanted_software = rendering == waypuppet_compositor::Rendering::Software;
+    // Only checked in one direction. `Software` is a promise and is asserted;
+    // `Fastest` is "whatever this machine has", which on a runner with no
+    // render node is software too — asserting otherwise would fail CI for
+    // being CI.
+    let must_be_software = rendering == waypuppet_compositor::Rendering::Software;
     fixture::guarded_on(name, OUTPUT, rendering, move |harness| {
-        assert_eq!(
-            harness.renders_in_software(),
-            wanted_software,
-            "the session is not on the renderer this test asked for",
+        assert!(
+            !must_be_software || harness.renders_in_software(),
+            "--software was asked for and this session is not on it, so the test \
+             proves nothing about the software path",
         );
 
         let mut client = harness.start_client("capture-fixture");
