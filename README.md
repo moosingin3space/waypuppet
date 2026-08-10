@@ -10,8 +10,8 @@ session default started
 $ waypuppet wait --windows 1
 $ waypuppet type 'ls -la'
 $ waypuppet key Return
-$ waypuppet shot -o /tmp/after-ls.png
-/tmp/after-ls.png	1280x800
+$ waypuppet shot
+/run/user/1000/waypuppet/default.captures/waypuppet-0000.png	1280x800
 ```
 
 No sleeps, and none needed: `wait` blocks until the compositor has seen the window, and
@@ -142,8 +142,32 @@ is none.
 You are not expected to know any of that. waypuppet works out which runtime it needs, puts
 itself and your application in the same one, and figures out the mounts from the command
 you gave it. `waypuppet run -- ./target/debug/my-app` is the whole interface; if you ever
-find yourself writing `flatpak run` to use waypuppet, that is a bug. `waypuppet doctor`
-prints what it resolved, for when you do want to look.
+find yourself writing `flatpak run` to use waypuppet, that is a bug.
+
+`waypuppet doctor` prints what it resolved, for when you do want to look:
+
+```
+$ waypuppet doctor --sandbox flatpak
+render      /dev/dri/renderD128	hardware
+enclosure   host
+sandbox     flatpak org.freedesktop.Platform//25.08
+binary      /usr/local/bin/waypuppet
+socket      /run/user/1000/waypuppet
+render node passed in
+mounts      /run/user/1000/waypuppet
+            /home/you/project
+```
+
+If a runtime is missing it says so and offers `waypuppet setup`, which is the only thing
+that will ever download one — a first run that quietly pulls a gigabyte is a bad surprise.
+`--sandbox none` opts out entirely, and a `waypuppet.toml` beside your project pins a
+runtime or adds a mount once instead of every caller passing flags:
+
+```toml
+[sandbox]
+runtime = "org.freedesktop.Sdk//25.08"
+mounts = ["./assets"]
+```
 
 ## Interface
 
@@ -153,7 +177,8 @@ drive a session too, but the command line is the product.
 
 | | |
 |---|---|
-| `waypuppet doctor` | what can we render with |
+| `waypuppet doctor` | what can we render with, and where a session would run |
+| `waypuppet setup` | install the runtime, if one is missing |
 | `waypuppet run -- CMD` | start a session, spawn a client |
 | `waypuppet ps` | list windows: id, title, app id, geometry, frames |
 | `waypuppet shot` | capture to PNG, print the path |
@@ -215,9 +240,14 @@ Selectors turn that tree into something to aim with: `click --on 'button[name="S
 widget. The grammar is a subset of CSS, and what it does not support it refuses by name
 with the equivalent spelled out, rather than matching nothing quietly.
 
-**Not yet.** Running your application without knowing waypuppet lives in a container —
-[plan 08](plans/08-sandbox-autonomy.md) — which is also what gates pointing any of this at
-[example-app] rather than at GTK.
+The container is hidden. `waypuppet run -- ./my-app` decides whether a runtime is needed,
+finds one, derives which directories have to be visible from inside it, and puts waypuppet
+and your application in there together — see [plan 08](plans/08-sandbox-autonomy.md).
+`gtk3-widget-factory` has been hosted inside a container and driven entirely from outside
+it: waited for, inspected, clicked by selector, and captured.
+
+**Not yet.** Pointing all of this at [example-app] rather than at GTK, which is what the
+project was started for and is now unblocked rather than done.
 
 [CLAUDE.md] has the architecture, [plans/](plans/) has one file per phase with its status
 and what it taught us, and [docs/](docs/) covers using waypuppet in CI.

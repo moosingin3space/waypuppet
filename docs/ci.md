@@ -24,8 +24,23 @@ Check what you got before debugging anything else:
 - run: waypuppet doctor
 ```
 
-It prints the devices it found, one per line, and fails with an explanation if there are
-none.
+It prints the devices it found, where it would host a session, and fails with an
+explanation if the answer is nowhere.
+
+### waypuppet does not open a container inside your container
+
+On a developer's machine waypuppet will start a flatpak runtime for itself when the machine
+cannot render. In CI you are already in a container, so it does not: a container cannot
+open another, and `doctor` says exactly that rather than trying and failing obscurely.
+
+That means the libraries have to be in *your* image — which is the ordinary arrangement,
+since your application needs them too. The one that catches people out is the software
+rasteriser: install mesa's DRI drivers (`libgl1-mesa-dri` and `libegl-mesa0` on Debian), or
+EGL initialises, reports no devices, and looks identical to a missing `/dev/dri`.
+[`ci/Containerfile`](../ci/Containerfile) is the list waypuppet's own CI uses.
+
+If you would rather waypuppet never think about this at all, `--sandbox none` says so
+outright.
 
 ## The shape of a test
 

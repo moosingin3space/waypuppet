@@ -1,8 +1,7 @@
 # 08 — Sandbox autonomy
 
-**Status:** not started
-**Depends on:** [03](03-control-socket.md). Can land any time after; pull it forward if
-using waypuppet on a real project starts costing more explanation than it saves.
+**Status:** done
+**Depends on:** [03](03-control-socket.md). Landed after 07, though it only ever needed 03.
 
 ## Goal
 
@@ -24,25 +23,98 @@ over a Unix socket and share graphics buffers.
 Left to the caller, that is a `flatpak run` line with six flags on it, most of which are
 about paths. It is exactly the kind of mechanics that makes a tool not worth reaching for.
 
-## Approach to try first
+## What landed
 
-**One sandbox holding both.** waypuppet detects that it needs a runtime it is not currently
-in, re-executes itself inside one, and spawns the child there too. Compositor and client
-land in the same namespace and everything downstream is ordinary.
+`waypuppet-sandbox` decides, and the `waypuppet` binary acts on the decision.
 
-- `--sandbox auto|flatpak|podman|none`, defaulting to `auto`. `none` when the current
-  process already has what it needs — detect via `/.flatpak-info` and
-  `/run/.containerenv`, and confirm with the same EGL probe `doctor` uses.
-- Derive the mounts rather than asking for them: the directory of the command being run,
-  the working directory, the capture output directory, and the session socket directory.
-  These four cover the ordinary case.
-- Pass the environment through, minus the variables waypuppet is authoritative for —
-  `WAYLAND_DISPLAY`, `DISPLAY`, `XDG_RUNTIME_DIR`, the D-Bus addresses. Silently inheriting
-  a `WAYLAND_DISPLAY` that points at the user's real desktop is the worst available
-  failure, because it looks like it worked.
-- Optional `waypuppet.toml` in the project, so a repository can state its runtime and extra
-  mounts once instead of every caller passing flags. Optional is the point: the defaults
-  have to work without it.
+- **`--sandbox auto|flatpak|podman|none`** on `run`, and on `doctor` so the plan can be
+  inspected without starting anything. `auto` runs here when this process can already
+  render and finds a runtime when it cannot.
+- **The four mounts are derived**, not asked for: the socket directory, the capture
+  directory, the working directory, and the directories of both binaries. They are reduced
+  to the shortest covering set, so a binary under the working directory does not get a
+  mount of its own.
+- **`org.freedesktop.Platform//25.08` is preferred over the SDK**, the opposite of what
+  waypuppet's own Justfile does. The SDK adds a compiler toolchain, which is what building
+  waypuppet needs and running an application does not; the Platform is already installed on
+  any machine with one graphical flatpak on it.
+- **`waypuppet.toml`** states a runtime, an image and extra mounts once per repository.
+  Found by walking up from the working directory; relative mounts resolve against the file
+  rather than against whoever ran waypuppet.
+- **`waypuppet setup`** installs a missing runtime, and nothing installs one without being
+  asked.
+- **`doctor` prints the resolved plan** — runtime, binary, socket, render node, mount list
+  — and its exit code follows the plan rather than the device list, because "nothing to
+  render with here, and a runtime that supplies it" is a working machine.
+
+Verified end to end: `gtk3-widget-factory` hosted inside a podman container and driven from
+the host — `wait --windows`, `ps`, `tree`, `click --on 'button[name="Minimize"]'` and a
+capture of the real widget factory — with the caller passing nothing but `--image`.
+
+## Done when
+
+- ~~On a machine with nothing but flatpak and waypuppet installed,
+  `waypuppet run -- ./target/debug/example-app-app` produces a capture.~~ Done, against
+  `gtk3-widget-factory` in both runtimes. Pointing it at example-app is the next thing to try.
+- ~~`waypuppet doctor` prints the resolved plan.~~ Done.
+- ~~Failures name the missing piece and the exact command that fixes it.~~ Done, and
+  checked over every `Obstacle` variant by an exhaustive match.
+- ~~Someone who has never used Flatpak can follow the README and get a screenshot.~~ Done
+  — `waypuppet setup` is the one command, and only when a runtime is actually missing.
+
+## What it taught us
+
+**Every real bug here was a path meaning two different things, and none of them had a
+symptom.** That is the theme, and it is why the guard rails are shaped the way they are.
+
+- **`/home` is a symlink on an image-based system, and does not exist inside the sandbox at
+  all.** A mount derived from `/home/you/project` is a mount of nothing, and the failure
+  surfaces as an application that cannot find its own files. Every path is now resolved
+  through `settle` before it is used for anything.
+- **`XDG_RUNTIME_DIR` has the same value inside a flatpak sandbox and names a different
+  directory.** Two processes computing a socket path from it agree on the string and
+  disagree on the file, so the session comes up and nothing ever finds it. `WAYPUPPET_SOCKET_DIR`
+  names it outright; the agreement is stated rather than inherited.
+- **`/tmp` was the worst possible default for captures**, and it took two failures to see
+  it. Every container has its own, so a capture written there vanishes and the path handed
+  back names nothing — and podman *refuses to SELinux-relabel `/tmp`* at all, while
+  mounting it unrelabelled produces a container that cannot read it. Captures now go to
+  the session's own directory beside its socket, which also fixes two sessions overwriting
+  each other's `waypuppet-0000.png`.
+- **An image's `XDG_RUNTIME_DIR` is typically created by root at mode 700**, which
+  `--userns=keep-id` then maps to somebody else. The compositor fails at startup with
+  "Could not write to XDG_RUNTIME_DIR", which reads as a waypuppet bug. It is set to the
+  session directory, the one place known to be both mounted and ours.
+- **A capture aimed outside the sandbox is refused rather than written.** This is the
+  `NotSettled`/`LoopStalled` rule again: the write would *succeed*, into a private
+  filesystem, and the reported path would name nothing. `Failure::Unshared` names the
+  directories that would work and the flag that adds another.
+
+Two structural notes worth carrying forward:
+
+- **`serve` has no `--sandbox`, and that is load-bearing.** It is the verb that means
+  "here, now", and it is what `run` re-executes inside a runtime. Keeping it incapable of
+  entering one makes recursion unrepresentable rather than relying on the detection to
+  notice — the same move as `bridge::Watching` splitting conditions so neither half can be
+  handed one it cannot see.
+- **Separating the decision from the detection is what made it testable.** `resolve` is
+  pure: facts in, plan out. A host with no flatpak, a container with no render node, a
+  runtime installed at the wrong branch — each is three lines of test instead of a machine
+  nobody will arrange. Twenty-two of them, none needing a container.
+
+## Still to do
+
+- **Point it at [example-app](../../example-app).** That was the reason for the project, and it is
+  now unblocked rather than done.
+- **Podman refuses to relabel a system directory**, so `--sandbox-mount /tmp` fails with
+  podman's own message rather than one of waypuppet's. It no longer happens by default,
+  which is why it was left; the fix is to refuse such a mount at plan time with a named
+  alternative.
+- **The re-executed binary must suit the runtime.** waypuppet re-executes *itself* inside,
+  so a host-built binary meets the runtime's glibc. It works in both directions here, and
+  the failure is reported with whatever the loader said, but shipping waypuppet as a
+  flatpak — the alternative priced below — would remove the question rather than diagnose
+  it.
 
 ## Alternative worth pricing
 
@@ -50,28 +122,4 @@ Ship waypuppet *as* a Flatpak with the SDK as its runtime. That removes re-execu
 entirely and makes installation a single `flatpak install`. It costs the ability to run a
 locally built waypuppet against a locally built application without packaging either, which
 during development is most of the time — so it may be the right answer for distribution and
-the wrong one for the inner loop. Both can be true.
-
-## Done when
-
-- On a machine with nothing but flatpak and waypuppet installed,
-  `waypuppet run -- ./target/debug/example-app-app` produces a capture.
-- `waypuppet doctor` prints the resolved plan: which sandbox it would use, which runtime,
-  what it would mount, and which render node it found. Getting a path wrong is the most
-  likely failure and the hardest to guess at, so it must be inspectable without a `--debug`
-  flag.
-- Failures name the missing piece and the exact command that fixes it, rather than
-  surfacing whatever the container runtime said.
-- Someone who has never used Flatpak can follow the README and get a screenshot.
-
-## Notes
-
-- **Never install a runtime without asking.** A first run that silently pulls a gigabyte is
-  a bad surprise. Detect, explain, and offer the command — or a `waypuppet setup` that does
-  it deliberately.
-- Nested containers are worth an explicit error rather than a confusing one. Running
-  waypuppet inside a Podman container that has no render node cannot be fixed by trying
-  harder, and should say so.
-- Watch for path identity across the boundary: a capture written to `/tmp/x.png` inside the
-  sandbox must be reported at the path the *caller* can open. If those differ, translate
-  before answering, or refuse to write there.
+the wrong one for the inner loop. Both can be true, and nothing here forecloses it.

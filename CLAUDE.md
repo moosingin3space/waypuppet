@@ -38,6 +38,8 @@ crates/
   waypuppet-proto        # the `Waypuppet` service and its types. No I/O.
   waypuppet-select       # the selector grammar: parse, print, resolve, validate,
                          #   and the AT-SPI role vocabulary. No I/O either.
+  waypuppet-sandbox      # which runtime a session needs and how to re-enter it.
+                         #   `resolve` is pure; `detect` is where the I/O is kept.
   waypuppet-compositor   # the compositor, and the session built around it:
     src/state.rs         #   protocol handlers and window bookkeeping
     src/render.rs        #   EGL, offscreen compositing, readback, PNG
@@ -45,6 +47,7 @@ crates/
     src/session.rs       #   compositor thread, child process, RPC server
     src/a11y.rs          #   the private D-Bus session, and the AT-SPI registry
   waypuppet              # the `waypuppet` binary: `serve`, plus every client verb.
+    src/sandbox.rs       #   the edge: resolving paths, starting a runtime
 ```
 
 The load-bearing seams are the capture path (GLES offscreen render → `ExportMem` → PNG),
@@ -375,9 +378,61 @@ awkward in practice, not before.
 
 A caller should never have to know that waypuppet runs in a container, which flags that
 container needs, or that their application needs the same one. `waypuppet run -- ./my-app`
-is the whole interface; working out how to make that true is
-[plan 08](plans/08-sandbox-autonomy.md). Anything that pushes container mechanics back onto
-the caller is a bug in waypuppet, not something for them to configure.
+is the whole interface. Anything that pushes container mechanics back onto the caller is a
+bug in waypuppet, not something for them to configure.
+
+`waypuppet-sandbox` is how: `resolve` turns a `Request` and a set of `Facts` into a `Plan`,
+which is either "run here" or "re-execute inside this runtime with these directories
+visible". The four mounts are derived from the command rather than asked for — socket
+directory, capture directory, working directory, and the two binaries' own directories —
+and reduced to the shortest covering set.
+
+Two structural choices hold it together:
+
+- **The decision is pure; only the looking is not.** `resolve` does no I/O. Everything
+  about the machine arrives as data from `examine`. That is what makes the interesting
+  cases — a host with no flatpak, a container with no render node, a runtime at the wrong
+  branch — three lines of test each instead of a machine nobody will arrange.
+- **`serve` has no `--sandbox`.** It is the verb that means "here, now", and it is what
+  `run` re-executes inside a runtime. Keeping it incapable of entering one makes recursion
+  unrepresentable rather than something the detection has to notice — the same move as
+  `Watching` splitting `wait` conditions so neither half is handed one it cannot see.
+
+`org.freedesktop.Platform` is preferred over the SDK, which is the opposite of what the
+Justfile does and deliberately so: the SDK's extra is a compiler toolchain, which building
+waypuppet needs and running an application does not, and the Platform is already installed
+on any machine with one graphical flatpak on it.
+
+### A path is the thing most likely to mean two things
+
+Every real bug in the sandbox work was a path that named one directory outside and a
+different one inside, and **none of them had a symptom**. That makes them the shape of
+failure this project cares most about, so the defences are structural rather than
+documented:
+
+- **Resolve symlinks before deriving anything.** On an image-based system `/home` is a
+  symlink to `/var/home`, and inside a flatpak sandbox `/home` does not exist at all. A
+  mount derived from the unresolved spelling is a mount of nothing, surfacing as an
+  application that cannot find its own files. `settle` is applied at the edge, once, so the
+  pure core never sees an unresolved path.
+- **Name the socket directory outright.** `XDG_RUNTIME_DIR` keeps its *value* inside a
+  sandbox and changes its *referent*. Two processes computing a socket path from it agree
+  on the string and disagree on the file, so the session starts and nothing ever finds it.
+  `WAYPUPPET_SOCKET_DIR` states it instead, and `session::socket_path` prefers it.
+- **Captures live with the session, not in `/tmp`.** Every container has its own `/tmp`, so
+  a capture written there vanishes and the reported path names nothing; podman will not
+  even relabel `/tmp` for SELinux, and mounting it unrelabelled yields a container that
+  cannot read it. The default is now `<socket>.captures`, which is already mounted and is
+  per-session — which also fixed two sessions overwriting each other's
+  `waypuppet-0000.png`.
+- **Refuse a capture aimed outside the sandbox.** `Failure::Unshared` rather than a write
+  that succeeds into a private filesystem. This is the `NotSettled`/`LoopStalled` rule in
+  another costume: the dangerous outcome is not the error, it is the success that reports a
+  path nobody can open.
+
+The general lesson, worth more than any of the fixes: **when a value crosses a boundary,
+state it rather than letting both sides derive it.** Agreement by coincidence is agreement
+until it is not, and it fails silently when it goes.
 
 ### anvil is a reference, not a template
 
@@ -537,8 +592,15 @@ the control thread before anything crosses the bridge, so it stays one call with
 settle. `ci/toolkit-smoke.sh` drives `gtk3-widget-factory` by selector and checks the
 resolved point against the bounds the application itself published.
 
-Not yet: [plan 08](plans/08-sandbox-autonomy.md), which is what would let any of this be
-pointed at [example-app](../example-app) rather than at GTK.
+The sandbox is hidden, which was [plan 08](plans/08-sandbox-autonomy.md). `waypuppet run --
+./my-app` works out whether a container is needed, finds a runtime, derives the mounts and
+puts waypuppet and the application in it together; `doctor` prints the plan it resolved.
+`gtk3-widget-factory` has been hosted inside a podman container and driven from the host —
+`wait`, `ps`, `tree`, `click --on` and a capture — with the caller passing nothing but
+`--image`.
+
+Not yet: pointing any of this at [example-app](../example-app) rather than at GTK, which is now
+unblocked rather than done.
 
 **The roadmap lives in [`plans/`](plans/)** — one file per phase, in the order they should
 land, each with its own acceptance criteria and, once landed, what it taught us.
