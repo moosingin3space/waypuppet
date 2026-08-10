@@ -56,16 +56,36 @@ const SETTLE_DEADLINE: Duration = Duration::from_secs(2);
 
 /// Where a named session's control socket lives.
 ///
+/// Normally `$XDG_RUNTIME_DIR/waypuppet`, but [`SOCKET_DIR`] wins when it is
+/// set, and that override is what makes a sandboxed session reachable.
+///
+/// The subtlety is worth stating, because it is invisible and it breaks
+/// everything. Inside a flatpak sandbox `XDG_RUNTIME_DIR` still has a value, and
+/// on an ordinary machine it is even the *same* value — but it names a different
+/// directory, private to the sandbox. Two processes computing a socket path from
+/// it would agree on the string and disagree on the file, so the session would
+/// come up and nothing would ever find it. When waypuppet builds the sandbox it
+/// therefore names the directory outright rather than letting either side infer
+/// it.
+///
 /// # Errors
 ///
-/// Returns [`Error::Compositor`] if `XDG_RUNTIME_DIR` is not set, which means
-/// there is nowhere private to put a socket.
+/// Returns [`Error::Compositor`] if neither variable is set, which means there
+/// is nowhere private to put a socket.
 pub fn socket_path(name: &str) -> Result<PathBuf, Error> {
-    let base = std::env::var_os("XDG_RUNTIME_DIR")
-        .ok_or_else(|| Error::Compositor("XDG_RUNTIME_DIR is not set".to_owned()))?;
-    Ok(PathBuf::from(base)
-        .join("waypuppet")
-        .join(format!("{name}.sock")))
+    let base = if let Some(directory) = std::env::var_os(waypuppet_sandbox::SOCKET_DIR) {
+        PathBuf::from(directory)
+    } else {
+        let runtime = std::env::var_os("XDG_RUNTIME_DIR").ok_or_else(|| {
+            Error::Compositor(format!(
+                "neither XDG_RUNTIME_DIR nor {} is set, so there is nowhere to put a \
+                 control socket",
+                waypuppet_sandbox::SOCKET_DIR
+            ))
+        })?;
+        PathBuf::from(runtime).join("waypuppet")
+    };
+    Ok(base.join(format!("{name}.sock")))
 }
 
 /// Everything the RPC handlers share.
@@ -78,6 +98,12 @@ struct Inner {
     /// same bargain the renderer makes.
     a11y: Result<Accessibility, String>,
     capture_dir: PathBuf,
+    /// The host directories this session can write to and have the caller find,
+    /// or `None` when it is not in a sandbox waypuppet built.
+    ///
+    /// Read once at startup rather than per capture, so the answer cannot change
+    /// underneath a session that is already reporting paths.
+    visible: Option<Vec<PathBuf>>,
     /// Counts captures, so unnamed ones get distinct file names.
     captures: AtomicU64,
     client: Mutex<Life>,
@@ -178,6 +204,7 @@ pub async fn serve(
         commands,
         a11y,
         capture_dir: config.capture_dir.clone(),
+        visible: waypuppet_sandbox::visible_paths(),
         captures: AtomicU64::new(0),
         client: Mutex::new(Life::default()),
         logs: Mutex::new(Logs::default()),
@@ -522,6 +549,16 @@ impl Waypuppet for Server {
             .map_err(Failure::Capture)?;
 
         let path = output.unwrap_or_else(|| self.capture_path());
+        // Before creating anything: a sandboxed session writing outside what it
+        // shares would succeed into its own private filesystem and then report a
+        // path the caller cannot open. Refusing is the only answer that has a
+        // symptom.
+        if !waypuppet_sandbox::writable(self.0.visible.as_deref(), &path) {
+            return Err(Failure::Unshared {
+                path,
+                visible: self.0.visible.clone().unwrap_or_default(),
+            });
+        }
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|error| Failure::Capture(error.to_string()))?;
         }

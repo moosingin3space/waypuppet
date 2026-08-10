@@ -492,6 +492,28 @@ pub enum Failure {
     /// Rendering or writing the capture failed.
     #[error("capture failed: {0}")]
     Capture(String),
+    /// A capture was aimed somewhere the caller could not have read it from.
+    ///
+    /// This session runs inside a sandbox, and the requested path is not one of
+    /// the directories that sandbox shares with the machine outside. The write
+    /// would *succeed* — a container has its own `/tmp`, and it is perfectly
+    /// happy to be written to — and then the path handed back would name a file
+    /// that does not exist for whoever asked. A failure with no symptom is the
+    /// worst kind this project has, so it is refused instead.
+    #[error(
+        "{} is not shared with the machine outside this session's sandbox, so a capture \
+         written there would vanish and the path reported back would name nothing\n\n  \
+         help: write it under one of {}, or start the session with `--sandbox-mount {}`",
+        .path.display(),
+        .visible.iter().map(|path| path.display().to_string()).collect::<Vec<_>>().join(", "),
+        .path.parent().unwrap_or(path).display(),
+    )]
+    Unshared {
+        /// Where the capture was aimed.
+        path: PathBuf,
+        /// The directories that are shared, which is where it could go instead.
+        visible: Vec<PathBuf>,
+    },
     /// No application has published an accessibility tree.
     ///
     /// The ordinary answer for a toolkit that does not publish one, or for one

@@ -2148,6 +2148,7 @@ dependencies = [
  "wayland-client",
  "wayland-protocols",
  "waypuppet-proto",
+ "waypuppet-sandbox",
  "waypuppet-select",
  "zbus",
 ]

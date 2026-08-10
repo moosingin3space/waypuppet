@@ -13,6 +13,10 @@ workspace = true
 
 [dependencies]
 waypuppet-proto.workspace = true
+# For the two facts a session needs about its own sandbox: where the control socket goes,
+# and which host paths it can really write to. A session that guesses at either reports a
+# capture the caller cannot open — see `session::socket_path`.
+waypuppet-sandbox.workspace = true
 waypuppet-select.workspace = true
 
 calloop.workspace = true
