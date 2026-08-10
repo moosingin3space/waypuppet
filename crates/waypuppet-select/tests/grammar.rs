@@ -144,6 +144,31 @@ fn the_help_for_a_css_ism_names_what_to_write_instead() {
 }
 
 #[test]
+fn a_name_may_contain_anything_including_other_syntax() {
+    // An accessible name is whatever the application says it is, and quoting is
+    // what makes that safe. The regression: the XPath check used to search the
+    // whole input for `[@`, so a widget whose name contained it could not be
+    // selected at all — refused as a dialect it was not written in. Found by a
+    // property, on a seed that had not come up locally.
+    for name in [r"[@", "//button", "a > b", ".class", "#id", ":not("] {
+        let selector = format!("tree-item[name=\"{name}\"]");
+        let query = parse(&selector).unwrap_or_else(|error| panic!("{selector}: {error}"));
+        assert_eq!(query.first.name, Some(exact(name)), "{selector}");
+    }
+
+    // Which does not soften the detection: XPath is still XPath where it is
+    // actually written, whether or not it leads with a slash.
+    for xpath in ["//button[@name='Save']", "button[@name='Save']", "/dialog"] {
+        let error = parse(xpath).unwrap_err();
+        assert!(
+            matches!(error.kind, ErrorKind::LooksLikeXPath),
+            "{xpath}: {:?}",
+            error.kind
+        );
+    }
+}
+
+#[test]
 fn the_diagnostic_points_at_the_offending_text() {
     let error = parse("dialog button.primary").unwrap_err();
     assert_eq!(error.found(), ".primary");

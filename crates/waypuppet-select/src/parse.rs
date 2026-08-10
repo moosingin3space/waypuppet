@@ -207,6 +207,14 @@ impl<'a> Parser<'a> {
             self.bump();
             return Err(self.err(open..self.at, ErrorKind::EmptyStep));
         }
+        // `[@name=…]` is XPath's attribute syntax. Recognised here rather than
+        // by searching the input, because by this point anything inside quotes
+        // has been consumed as a value — an accessible name containing `[@` is
+        // a name, not a dialect.
+        if c == '@' {
+            self.bump();
+            return Err(self.err(open..self.at, ErrorKind::LooksLikeXPath));
+        }
         if !is_ident_start(c) {
             return Err(self.err(
                 self.at..self.at + c.len_utf8(),
@@ -664,16 +672,24 @@ fn exact(value: &str) -> Matcher {
     }
 }
 
-/// Whether this reads as `XPath`.
+/// Whether this *begins* as `XPath`.
 ///
 /// Worth detecting rather than letting fail as a stray `/`: `XPath` is what
 /// accessibility automation uses nearly everywhere else — Selenium, Appium — so
 /// it is the wrong dialect somebody is most likely to arrive with, and a
-/// translation costs one arm. `[@` is the distinctive part; a bare `@` is not,
-/// because an accessible name may contain one.
+/// translation costs one arm.
+///
+/// A prefix test only. The first version also searched the whole input for
+/// `[@`, which is the other distinctive shape — and an accessible name is
+/// allowed to contain anything, so `tree-item[name="[@"]` was refused as `XPath`.
+/// A property caught it; the seed that found it was not the one that ran
+/// locally, which is the argument for generating hostile names rather than
+/// plausible ones. The `@` case is now caught where it appears, in
+/// [`Parser::attribute`], where the text inside quotes has already been
+/// consumed as a value and cannot be mistaken for syntax.
 fn looks_like_xpath(input: &str) -> bool {
     let trimmed = input.trim_start();
-    trimmed.starts_with('/') || trimmed.starts_with("./") || input.contains("[@")
+    trimmed.starts_with('/') || trimmed.starts_with("./")
 }
 
 fn is_ident_start(c: char) -> bool {
