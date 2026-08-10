@@ -1,6 +1,11 @@
 [workspace]
 resolver = "3"
-members = ["crates/waypuppet", "crates/waypuppet-compositor", "crates/waypuppet-proto"]
+members = [
+    "crates/waypuppet",
+    "crates/waypuppet-compositor",
+    "crates/waypuppet-proto",
+    "crates/waypuppet-select",
+]
 
 [workspace.package]
 authors = ["Nathan Moos <moosingin3space@gmail.com>"]
@@ -10,6 +15,16 @@ edition = "2024"
 [workspace.dependencies]
 waypuppet-compositor = { path = "crates/waypuppet-compositor" }
 waypuppet-proto = { path = "crates/waypuppet-proto" }
+waypuppet-select = { path = "crates/waypuppet-select" }
+
+# Property testing. The selector grammar is the one part of waypuppet whose
+# output is read by something that cannot ask a follow-up question, so the
+# properties that matter — every rejection names a fix, a printed query parses
+# back to itself, a one-character typo still suggests the role it meant — are
+# worth checking over generated input rather than over examples somebody thought
+# of. `arbtest` is minimal, takes a time budget rather than a case count, and
+# prints a seed to replay a failure with.
+arbtest = "0.3"
 
 clap = { version = "4.6", features = ["derive", "env"] }
 png = "0.18"

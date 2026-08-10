@@ -190,10 +190,87 @@ publishes no tree; `Tree` means there was one and reading it went wrong. A sessi
 bus could not start serves the whole protocol and says so at startup, which is the bargain
 the renderer already makes.
 
+## Selectors: the grammar, and why it is CSS
+
+`waypuppet-select` is a crate of its own: `parse` (text → `Query`), `print` (`Query` →
+text), `resolve` (`Query` + tree → point), `validate` (the semantic checks, for structure
+that arrived as JSON), and `roles` (the vocabulary). Both ends need it and neither owns it
+— the CLI parses what a caller wrote, the control thread resolves it — and it is the part
+of waypuppet with the least I/O and the most branches, which is what lets its tests be
+property tests.
+
+**The syntax is a subset of CSS.** The decisive argument is not familiarity, though that
+matters: it is that **CSS's default combinator is the descendant axis**, which is exactly
+what a tree query wants. XPath's default is the child axis, so every XPath a caller wrote
+would be silently *widened* — a wrong answer with no symptom, which is the failure this
+project spends its effort avoiding. XPath also does not dodge the problem it looks like it
+solves: its element names are NCNames, so `list item` needs `*[@role="list item"]` there
+just as it needs `list-item` here. And Datalog was considered and dropped for the opposite
+reason — its whole value is joins across relations, there is one relation here, so the
+syntax would advertise far more than the engine does, and its failure mode is the empty
+result.
+
+**No CSS library.** [`selectors`](https://lib.rs/crates/selectors) is the real engine and
+it costs 10 associated types plus 26 required `Element` methods, MPL-2.0, and a
+Servo-paced release cadence — to buy the half that is already written, since matching
+happens server side against a `Query` and the wire carries structure rather than a
+selector string. Worse, it fights the design: it would parse
+`button#save > .primary:nth-child(2)` happily and then match nothing.
+[`simplecss`](https://docs.rs/simplecss) is the light alternative (5 methods, one
+dependency) and is CSS 2.1, so `:not()` and the Selectors-4 `i` flag are already outside
+it. The parser is ~350 lines by hand, and the thing no library provides — the rejection
+catalogue — is where the value is.
+
+**What CSS has and this does not is refused by name.** That catalogue *is* the interface:
+`.class`, `#id`, `::before`, `+`, `~`, `,`, `:nth-child()`, `:checked`, `:hover`,
+`:contains()`, `~=`, `|=`, `=~`, and XPath itself each get their own diagnostic naming the
+equivalent — `:nth-child(2)` says position is `--index N` and that it is zero-based;
+`~=` says CSS means word-list containment by it and points at `*=`. Collapsing them into
+one syntax error would be true and useless, since each has a different right answer.
+
+**Roles are a closed vocabulary, so an unknown one is a parse error.** `textbox` is not a
+selector that matches nothing; it is a selector that *cannot* match anything, and reporting
+it as `NoMatch` is the same look-alike collapse as reporting a stalled loop as a timeout.
+The 130 names are checked at parse and the closest real ones offered. Two signals, because
+edit distance alone was not enough: `pushbutton` is four edits from both `button` and
+`push button menu`, which reads as noise and is in fact exactly right, so containment
+counts too.
+
+**The collision that shaped everything else has its own diagnostic.** AT-SPI role names
+contain spaces and CSS's descendant combinator *is* a space. Roles are therefore hyphenated
+in a type selector — and `list item` is refused with "write `list-item`", found by scanning
+the words around the unknown token for a run that spells a role, longest first. Without it
+the caller is told `item` is not a role and offered `icon`: true, useless, and pointing away
+from the answer they are already holding.
+
+**Two doors, one representation.** The text form is one way in; the structure can arrive as
+JSON, which is what makes an MCP server thin — the tool is a wrapper over `Query` with no
+hand-maintained schema. So `validate` re-runs the semantic checks and *canonicalises*, and
+the property `parse(print(q)) == q` plus "a parsed query is a fixed point of `validate`"
+are what keep the two from drifting into separate dialects. `deny_unknown_fields` is on the
+query types for the same reason: a caller writing `{"text":"Save"}` is told, rather than
+having the field dropped and the query quietly widened to every node in the tree.
+
 ## Still to do
 
-**Selectors** — `click --on 'button[name="Reconnect"]'`. Decided, not yet built. The
-shape the investigation settled into:
+**Wiring.** The crate is finished and tested; nothing calls it yet. What remains is
+`click --on`, `key`/`type --focus-on`, `--index`, the `Locator` in the `Waypuppet` trait,
+the resolved focus point across the bridge, and `Accessibility::locate`. The design for
+each is below and unchanged.
+
+**Two verbs that are worth more than the grammar**, both of which the printer already
+makes cheap: `waypuppet tree --selectors`, printing a minimal unique selector beside each
+node so a caller copies rather than composes; and `waypuppet select '<query>'`, a dry run
+showing what matched and where, so a selector can be iterated with no side effects.
+
+**Deferred, and named in the error rather than silently missing.** `#id` maps to AT-SPI's
+accessible id and `:checked`/`:disabled`/`:focus` map almost one-to-one onto AT-SPI states
+— both are the *right* CSS spellings and both need `Node` to carry data `a11y` does not
+fetch yet. That is the order to add them in: the vocabulary is already agreed, so the work
+is in `a11y.rs`, not in the grammar. `+`, `~`, `:nth-child()` and `:has()` are all
+implementable against `Node` and none are needed yet.
+
+The shape the investigation settled into, which the implementation follows:
 
 - **Resolution happens on the server, not in the CLI.** A selector travels over the wire
   as a structured query — a new protocol type — and the control thread resolves it
@@ -210,10 +287,12 @@ shape the investigation settled into:
   an LLM generating waypuppet calls could emit the structured query directly, never
   spelling the grammar.
 
-- **The grammar itself is not fixed yet.** Deferred deliberately: it has to be shaped
-  against what the tree actually contains — multi-word AT-SPI role names (`"list item"`,
-  `"page tab list"`), exact-versus-regex name matching, and compound paths all need a
-  look at `gtk3-widget-factory`'s 261 nodes before the syntax is chosen.
+- **The grammar is CSS, and settled** — see above. The one substantive thing shaping it
+  against the real tree changed the answer: multi-word role names collide with CSS's
+  descendant combinator, which is why roles hyphenate. Regex was dropped rather than
+  spelled: CSS has no regex operator, `~=` means something else, and `*=`/`^=`/`$=` cover
+  what a pattern was wanted for here — the ellipsis in `Save As…` and the mnemonic in
+  `_Open`. `Matcher` keeps a shape that can grow one if the JSON door ever needs it.
 
 - **Failure variants are distinct, not one `Selector(String)`.** Following `BadPattern`'s
   precedent, a malformed selector reports once, at parse, rather than being retried at
@@ -265,80 +344,38 @@ around what the tree actually contains now that it is real — see "Still to do"
 
 ### Wire types
 
-Three new types in `waypuppet-proto`. `Locator` is the one the verbs take; `Query` and
-`Predicate` are what a locator carries when it is not a point.
+Landed in `waypuppet-proto`. `Locator` is the one the verbs take; the rest are what a
+locator carries when it is not a point. Sketched below with the reasoning; the shipped
+definitions and their full docs are in the crate.
 
 ```rust
-/// Where an input verb should land.
-///
-/// Mutually exclusive by construction: a point and a tree query are different
-/// things a caller should not be able to ask for at once, so this is a type
-/// rather than a pair of `Option`s checked by hand — the same instinct that
-/// made `Target` an enum.
-#[serde(rename_all = "snake_case")]
-enum Locator {
-    /// A specific point, as `--at X,Y` takes today.
-    At(Point),
-    /// A query against the tree, resolved to the matched node's centre on the
-    /// control thread before the event is dispatched.
-    On(Query),
-}
+enum Locator { At(Point), On(Query) }
 
-/// A query against the accessibility tree — a descendant path.
-///
-/// Each `Predicate` matches some node; each later one a descendant of the
-/// previous match; the last one's match is the target. A single-element path is
-/// a flat match anywhere in the tree, which is the common case; more elements
-/// narrow by structure without insisting on a direct-child chain. The text
-/// grammar compiles down to this, and an LLM may emit it directly.
-struct Query {
-    /// Root-to-target predicates. Non-empty; an empty path is `BadQuery`.
-    path: Vec<Predicate>,
-    /// Which match of the final predicate to take. `None` requires a unique
-    /// match; `Some(i)` takes the zero-based i-th. The distinction is intent: a
-    /// caller who wrote no index wants one answer, and silence on a many-match
-    /// query would hide a selector that points at several things.
-    index: Option<usize>,
-}
+struct Query { first: Predicate, rest: Vec<Step>, index: Option<usize> }
+struct Step { combinator: Combinator, predicate: Predicate }
+enum Combinator { Descendant, Child }
 
-/// One step of a `Query`.
-///
-/// Matches a node's identity, never its geometry: bounds are how a match is
-/// clicked, not what is selected by — a node with no bounds is a failure, not a
-/// non-match. Starts minimal (exact role, exact name); the grammar decision
-/// (regex, case, compound) is deferred and will extend `Predicate` rather than
-/// reshape it.
-struct Predicate {
-    /// The AT-SPI role, matched exactly — `button`, `list item`. `None` matches
-    /// any role.
-    role: Option<String>,
-    /// The accessible name, exact and case-sensitive. `None` matches any name,
-    /// including absent.
-    name: Option<String>,
-}
+struct Predicate { role: Option<Matcher>, name: Option<Matcher>, not: Vec<Predicate> }
+enum Matcher { Present, Matches { op: MatchOp, value: String, case: Case } }
+enum MatchOp { Exact, Contains, Prefix, Suffix }
+enum Case { Sensitive, Insensitive }
 
-/// One node a selector matched, trimmed to what disambiguates it.
-///
-/// Carried by [`Failure::Ambiguous`] so a caller — or an agent — can see what
-/// matched and fix the query. Not a full [`Node`]: the subtree under a match is
-/// noise when the job is telling two matches apart. The `path` is the ancestor
-/// chain as [`Predicate`] steps, root to parent, so a caller can append this
-/// node's own role/name and write a `Query` that selects it alone — the
-/// diagnostic is constructive, not just a count.
-struct Match {
-    /// This node's actual role.
-    role: String,
-    /// This node's accessible name, if any.
-    name: Option<String>,
-    /// This node's bounds, if any. `None` here is a visible hint a caller can
-    /// filter against, rather than the silent failure a no-bounds match would
-    /// be at click time.
-    bounds: Option<Rect>,
-    /// Ancestor chain as `(role, name)` steps, root to parent. Empty for a
-    /// match at the root.
-    path: Vec<Predicate>,
-}
+struct Match { role: String, name: Option<String>, bounds: Option<Rect>, path: Vec<Predicate> }
 ```
+
+Three things here are not what the first draft said, and each was bought:
+
+- **`first` is a `Predicate`, not the head of a `Vec`.** An empty path is now
+  unrepresentable, so "a selector must select something" is a fact about the type rather
+  than a check to remember — and there is nowhere to put a leading combinator, so `> button`
+  cannot be represented and ignored. `Failure::BadQuery` survives for the JSON door.
+- **A step carries a combinator**, because `>` is core CSS and refusing it would be a worse
+  compatibility story than supporting it. It is also nearly free: `Node` has ordered
+  children.
+- **`role` is a `Matcher`, not a `String`.** CSS's type selector and its attribute selector
+  become one mechanism — `button` and `[role="button"]` parse identically — and
+  `[role*="button"]`, every kind of button of which AT-SPI has four, falls out. An exact
+  role is stored canonically, so the resolver compares against `Node::role` literally.
 
 ### Trait changes
 
@@ -367,21 +404,26 @@ impl Accessibility {
 }
 ```
 
-`At(p)` passes through unchanged. `On(q)` calls `tree()` and then a **pure** resolver
-that lives in a new `select` module:
+`At(p)` passes through unchanged. `On(q)` calls `tree()` and then the **pure** resolver in
+`waypuppet-select`:
 
 ```rust
 /// Resolve a query against a fetched tree to the click point.
 pub fn resolve(tree: &Node, query: &Query) -> Result<Point, Failure>;
 ```
 
-The algorithm is a descendant-axis path match:
+The algorithm matches right to left, which is how CSS engines do it and for the same
+reason: the rightmost step is the one that selects, and everything left of it only has to
+be satisfiable somewhere above.
 
-1. An empty path is `BadQuery` — also re-checked server side, because an LLM emitting
-   the structure directly bypasses the CLI parser.
-2. Candidates are nodes matching the final predicate that have an ancestor chain
-   (descendants, not necessarily direct children) matching the earlier predicates in
-   order. A single-element path makes every matching node a candidate — the flat case.
+1. A query cannot be empty — `first` is a `Predicate`, not a `Vec` — so that check is gone.
+   `validate` still runs the *semantic* checks server side, because a caller may send the
+   structure as JSON and bypass the parser.
+2. A node is a candidate when the last step matches it and what remains matches up its
+   ancestor chain: the immediate parent for `Child`, any ancestor for `Descendant`. The
+   descendant case tries each ancestor and **backtracks**, which becomes necessary once
+   `>` exists — `dialog panel > button` cannot be settled by taking the first `panel` that
+   fits, because the `>` constrains which one was meant.
 3. No candidates → `NoMatch`.
 4. `index` is `None` and there is more than one candidate → `Ambiguous`, carrying
    every candidate as a `Match` (role, name, bounds, ancestor path) so the caller can
@@ -429,9 +471,9 @@ Each is a distinct kind a caller reacts to differently, following `BadPattern`'s
 is the same class of distinction as `NoTree` from `Tree`.
 
 ```rust
-/// A selector query is malformed (e.g. an empty path). Reported by the CLI
-/// parser where it can be; re-checked server side for an LLM emitting the
-/// structure directly.
+/// A selector could not be understood. Carries the *rendered* diagnostic —
+/// caret, `help:` line and all — because the caller who needs it is the one
+/// who wrote the selector, and there is no second chance to ask for detail.
 #[error("malformed selector: {0}")]
 BadQuery(String),
 /// A selector matched no node.
@@ -463,20 +505,49 @@ MatchedNoBounds,
 
 ### The testability seam
 
-`select::resolve` is pure: it takes a `&Node` and returns a `Result<Point, Failure>`,
-with no D-Bus, no bridge, no tokio. So the resolution logic — the part with the real
-branches (no-match, ambiguous, no-bounds) — is tested by hand-building a `Node` and
-asserting on the outcome, exactly the shape `tests/tree.rs`'s fixture already produces.
-The defence to break, per the project rule: build the button at one set of bounds,
-resolve, then move the bounds and confirm the resolved point follows — a test that only
-checks "matched the Reconnect node" reads as coverage and is worse than none.
-`arbtest` fits here too: random trees and queries, asserting `resolve` is total (always
-a `Failure` variant or a point inside the matched bounds, never a panic).
+Nothing in `waypuppet-select` needs a compositor: a tree is a value and a selector is a
+string. That is what made the properties properties, and `arbtest`'s first use in this
+project. What is defended:
+
+- `parse(print(q)) == q` over generated queries, with **hostile names** — quotes,
+  backslashes, newlines, arbitrary unicode — because that is where a quoting bug lives.
+  It matters beyond tidiness: every selector a diagnostic hands back is *printed*, so a
+  printer the parser reads differently would turn advice into a wrong answer.
+- A parsed query is a fixed point of `validate`, so the text door and the JSON door cannot
+  drift apart.
+- **A one-character typo in a role still names the role it meant.** Generated from the
+  vocabulary, one random edit applied: either it still resolves — spaces and hyphens are
+  levelled, so several edits are no-ops — or the rejection names the original. This is the
+  property the closed-vocabulary argument rests on, and it is what "an agent can correct
+  itself in one round trip" actually means.
+- Parsing is total over arbitrary strings, every span lies inside the input and on a
+  character boundary, and every `ErrorKind` has a non-empty `help` distinct from its
+  message. Coverage of *every* variant is enforced by an exhaustive match in the test:
+  a new variant does not compile until it has a sample.
+- Resolution is total, and **a node is always selected by its own position** — the ancestor
+  chain of a match, turned into a query, finds that match again. `NoMatch` is unreachable
+  there by construction, which is what makes `Ambiguous`'s "narrow it with one of these"
+  advice that always leads somewhere. Checked end to end: the selectors an ambiguous result
+  hands back are parsed and resolved.
+
+Five defences were broken to confirm they fail: dropping the printer's case flag (two
+properties), treating `Child` as `Descendant` (the example test — the properties do not
+catch a *widening*, which is what examples are for), silencing suggestions, and deleting a
+role from the vocabulary, which the compositor's cross-check against `atspi` catches by
+name and number.
+
+That cross-check is worth its own note. The role table is a *copy*, because the CLI must
+refuse an unknown role without linking a D-Bus stack, and a copy drifts silently: a role
+added upstream simply becomes unselectable, reported as "not an AT-SPI role" to somebody
+looking straight at it in `waypuppet tree`. So `a11y`'s tests, in the one crate that has
+both, walk every `atspi::Role` and assert it round-trips.
 
 ### Deferred, and the warts that come with it
 
-- **The text grammar** (decision 2) — not fixed here; the wire type is shaped to accept
-  whatever it compiles to.
+- **`#id` and states.** The CSS spellings are already agreed and already refused by name;
+  what is missing is the data. `a11y` does not read AT-SPI's accessible id or state set, so
+  `#save` and `:checked` cannot be honoured — and an accessible id would be the most robust
+  selector available, stable across layout *and* locale, unlike a name.
 - **Multi-window.** `Waypuppet::tree`'s `target` is ignored server-side because a session
   hosts one window, so `On(_)` resolves against the focused window's tree and `click`'s
   `target` is effectively `Focused`. A `--window` alongside `--on` is the real question

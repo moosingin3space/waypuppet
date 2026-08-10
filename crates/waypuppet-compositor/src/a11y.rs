@@ -537,3 +537,39 @@ pub fn runtime_dir() -> Result<PathBuf, String> {
     std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
     Ok(directory)
 }
+
+#[cfg(test)]
+mod tests {
+    //! One test, and it is not about D-Bus.
+    //!
+    //! `waypuppet-select` carries its own copy of the AT-SPI role vocabulary,
+    //! because the CLI has to reject an unknown role without linking `atspi`.
+    //! A copy is a thing that drifts, and this one drifts *silently*: a role
+    //! added upstream would simply become unselectable, reported as "not an
+    //! AT-SPI role" to a caller looking straight at it in `waypuppet tree`.
+    //!
+    //! This is the only crate that has both, so this is where the two are held
+    //! against each other.
+
+    use atspi::Role;
+
+    #[test]
+    fn every_atspi_role_can_be_written_as_a_selector() {
+        // `atspi` numbers its roles from zero and its own tests walk to 129.
+        // Going one past the end is deliberate: if upstream adds a role, the
+        // conversion starts succeeding and this fails until the table is
+        // updated, which is the whole point.
+        for value in 0..=130u32 {
+            let Ok(role) = Role::try_from(value) else {
+                continue;
+            };
+            let name = role.name();
+            assert_eq!(
+                waypuppet_select::roles::canonical(name),
+                Some(name),
+                "atspi role {value} ({name:?}) is missing from waypuppet-select's vocabulary, \
+                 so a selector naming it would be refused"
+            );
+        }
+    }
+}

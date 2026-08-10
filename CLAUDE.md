@@ -36,6 +36,8 @@ build it inside.
 ```
 crates/
   waypuppet-proto        # the `Waypuppet` service and its types. No I/O.
+  waypuppet-select       # the selector grammar: parse, print, resolve, validate,
+                         #   and the AT-SPI role vocabulary. No I/O either.
   waypuppet-compositor   # the compositor, and the session built around it:
     src/state.rs         #   protocol handlers and window bookkeeping
     src/render.rs        #   EGL, offscreen compositing, readback, PNG
@@ -325,6 +327,43 @@ defaults pull `libinput` and `libseat`, neither of which is in the Flatpak SDK, 
 `default-features = false` has to sit on the *workspace* dependency because cargo forbids a
 member from turning off what the workspace left on.
 
+### Selectors are CSS, and the rejections are the feature
+
+`waypuppet-select` parses a subset of CSS. Familiarity is the obvious reason and the weaker
+one; the decisive one is that **CSS's default combinator is the descendant axis**, which is
+what a tree query wants. XPath's default is the child axis, so every XPath a caller wrote
+would be silently widened — and XPath does not even dodge the multi-word-role problem, its
+element names being NCNames too. Datalog was priced and dropped: its value is joins across
+relations, there is one relation here, so the syntax would promise far more than the engine
+delivers.
+
+No CSS library. `selectors` costs ten associated types and twenty-six `Element` methods to
+buy the half already written — matching happens server side against a `Query`, because the
+wire carries structure, not a selector string — and it would parse `button#save > .primary`
+happily and then match nothing. **The catalogue of things CSS has that this does not, each
+refused by name with the equivalent spelled out, is the product.** That is what no library
+provides and what the hand-written parser exists for.
+
+Three rules fall out and generalise past selectors:
+
+- **A closed vocabulary makes an unknown name a parse error.** `textbox` is not a selector
+  that matches nothing, it is one that *cannot*, and reporting it as `NoMatch` is the
+  `NotSettled`/`LoopStalled` collapse again. Suggest the closest real names; edit distance
+  alone is not enough, since `pushbutton` is four edits from `button` and exactly right.
+- **Generous at the edge, canonical on the wire.** `list-item`, `list_item` and `ListItem`
+  all resolve, once, at the point they were written; the resolver then compares literally.
+  Both doors into the structure — text and JSON — canonicalise identically, and
+  `parse(print(q)) == q` plus "a parsed query is a fixed point of `validate`" are what keep
+  them from becoming two dialects.
+- **A diagnostic that only says no is half a diagnostic.** Every `ErrorKind` carries a fix,
+  checked over every variant by an exhaustive match a new variant cannot skip.
+
+The one collision worth remembering: AT-SPI role names contain spaces and CSS's descendant
+combinator *is* a space. Roles hyphenate in a type selector, and `list item` gets its own
+error saying so — found by scanning the words around the unknown token for a run that
+spells a role. Reported as a plain unknown role it complains about `item` and offers
+`icon`, which is true and points away from the answer.
+
 ### CLI first, MCP maybe
 
 The CLI is the product. It composes with shell loops, it prints a path that `Read` can
@@ -421,7 +460,10 @@ Carried from [example-app](../example-app/CLAUDE.md), the reference for house st
 - `mod_module_files` is denied: use `foo.rs` alongside `foo/`, never `foo/mod.rs`.
 - Edition 2024, resolver 3, shared `[workspace.package]` metadata.
 - Test for classes of problems over examples: **`arbtest`** for property and model/oracle
-  tests, **`expect-test`** for fixture-driven example tests. Neither is wired up yet.
+  tests, **`expect-test`** for fixture-driven example tests. `arbtest` is in use in
+  `waypuppet-select`, which is the pattern to copy — generators that produce *valid* input
+  from the real vocabulary, so a property cannot pass vacuously. `expect-test` is not wired
+  up yet.
 - For crate information, [lib.rs](https://lib.rs) carries the same content as crates.io
   without requiring JavaScript, so it is easier to fetch. docs.rs example code is often the
   fastest way to get an API exactly right.
@@ -486,10 +528,16 @@ is the AT-SPI registry on it, so an application registers against waypuppet rath
 against the developer's desktop. 261 nodes out of `gtk3-widget-factory`, with roles, names
 and bounds in the coordinates `click --at` takes.
 
-Not yet: selectors — `click --on 'button[name="Save"]'` — which
-[plan 07](plans/07-accessibility-tree.md) deferred until the tree was real enough to shape
-them around. And [plan 08](plans/08-sandbox-autonomy.md), which is what would let any of
-this be pointed at [example-app](../example-app) rather than at GTK.
+Selectors are built but not yet wired. `waypuppet-select` parses a CSS subset —
+`dialog > button[name*="Save" i]:not([name="Cancel"])` — resolves it against the tree, and
+refuses everything CSS has that this does not by name, with the equivalent spelled out. It
+is covered by `arbtest` properties: printing round-trips, a one-character typo in a role
+still names the role it meant, parsing is total, and a node is always selected by its own
+position. What is left is `click --on`, `key`/`type --focus-on` and `--index` — the CLI and
+trait wiring, described in [plan 07](plans/07-accessibility-tree.md).
+
+Not yet: [plan 08](plans/08-sandbox-autonomy.md), which is what would let any of this be
+pointed at [example-app](../example-app) rather than at GTK.
 
 **The roadmap lives in [`plans/`](plans/)** — one file per phase, in the order they should
 land, each with its own acceptance criteria and, once landed, what it taught us.

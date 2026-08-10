@@ -266,43 +266,142 @@ pub struct Node {
     pub children: Vec<Node>,
 }
 
+/// How a string attribute is compared, in the CSS operator that spells it.
+///
+/// The set is CSS's, not one of waypuppet's choosing, and that is the point:
+/// `*=` means substring to every caller who has ever written a stylesheet, and
+/// a familiar operator repurposed to mean something else is worse than an
+/// unfamiliar one. CSS has no regular-expression operator, so [`MatchOp`] has
+/// none either — `~=` in CSS is whitespace-word-list containment, which is not
+/// what a caller reaching for a pattern wants, and claiming it would be exactly
+/// the quiet lie this project refuses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MatchOp {
+    /// `[name="Save"]` — the whole value.
+    Exact,
+    /// `[name*="Save"]` — anywhere in the value. The workhorse: accessible
+    /// names carry ellipses and mnemonics an exact match trips over.
+    Contains,
+    /// `[name^="Save"]` — the start of the value.
+    Prefix,
+    /// `[name$="Save"]` — the end of the value.
+    Suffix,
+}
+
+/// Whether a comparison folds case, as CSS Selectors 4's `[attr="v" i]` flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Case {
+    /// The default, and what CSS does without the flag.
+    Sensitive,
+    /// `[name="save" i]`.
+    Insensitive,
+}
+
+/// What one attribute has to be for a [`Predicate`] to match.
+///
+/// [`Matcher::Present`] is CSS's bare `[name]` — the attribute exists at all —
+/// and is a different question from "matches the empty string", which is why it
+/// is a variant rather than an [`MatchOp::Exact`] against `""`. Note the
+/// distinction one level up, too: a `None` field on a `Predicate` does not
+/// constrain the attribute, while `Some(Matcher::Present)` insists it is there.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum Matcher {
+    /// `[name]` — the node has one at all.
+    Present,
+    /// `[name<op>"value"]`, optionally case-insensitive.
+    Matches {
+        /// How `value` is compared against the node's attribute.
+        op: MatchOp,
+        /// What to compare against.
+        value: String,
+        /// Whether the comparison folds case.
+        case: Case,
+    },
+}
+
 /// One step of a selector [`Query`]: what a matched node has to be.
 ///
 /// Matches a node's identity, never its geometry. Bounds are how a match is
 /// *clicked*, not what it is *selected by* — a node with no bounds is a failure
-/// at click time ([`Failure::MatchedNoBounds`]), not a non-match here. Starts
-/// minimal (exact role, exact name); the text grammar decision — regex, case,
-/// compound — is deferred and will extend `Predicate` rather than reshape it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// at click time ([`Failure::MatchedNoBounds`]), not a non-match here.
+///
+/// A `None` field matches any node, including one with no name at all. `role`
+/// is a [`Matcher`] rather than a plain string so that CSS's type selector and
+/// its attribute selector are one mechanism: `button` and `[role="button"]`
+/// parse to the same predicate, and `[role*="button"]` — every kind of button,
+/// of which AT-SPI has four — falls out for free.
+///
+/// Every field is optional when this is read as JSON — `{"role":{"exact":…}}`
+/// is a whole predicate — and `deny_unknown_fields` is on for the same reason:
+/// a caller who writes `{"text":"Save"}` is told, rather than having the field
+/// dropped and the query silently widened to every node in the tree. A quietly
+/// broader match is the one failure this whole path exists to prevent.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct Predicate {
-    /// The AT-SPI role, matched exactly — `button`, `list item`. `None` matches
-    /// any role.
-    pub role: Option<String>,
-    /// The accessible name, exact and case-sensitive. `None` matches any name,
-    /// including an absent one.
-    pub name: Option<String>,
+    /// The AT-SPI role. `None` matches any role.
+    pub role: Option<Matcher>,
+    /// The accessible name. `None` matches any name, including an absent one.
+    pub name: Option<Matcher>,
+    /// CSS's `:not(…)`: every one of these must *fail* to match. Empty is the
+    /// ordinary case.
+    pub not: Vec<Predicate>,
 }
 
-/// A query against the accessibility tree — a descendant-axis path.
+/// How a selector step relates to the step before it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Combinator {
+    /// CSS's whitespace: anywhere below the previous match.
+    Descendant,
+    /// CSS's `>`: an immediate child of the previous match.
+    Child,
+}
+
+/// One `<combinator> <predicate>` step after the first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Step {
+    /// How this step relates to the step before it.
+    pub combinator: Combinator,
+    /// What the node at this step has to be.
+    pub predicate: Predicate,
+}
+
+/// A query against the accessibility tree — a CSS selector, as structure.
 ///
-/// Each [`Predicate`] matches some node; each later one a descendant of the
-/// previous match; the last one's match is the target. A single-element path is
-/// a flat match anywhere in the tree — the common case — and more elements
-/// narrow by structure without insisting on a direct-child chain. The text
-/// grammar compiles down to this, and an LLM may emit it directly.
+/// [`Query::first`] matches anywhere at or below the root; each [`Step`] in
+/// [`Query::rest`] then relates to the previous match by its [`Combinator`],
+/// and the last step's match is the target. A query with no `rest` is a flat
+/// match anywhere in the tree, which is the common case.
+///
+/// The first step is a [`Predicate`] rather than the head of a `Vec` on
+/// purpose: an empty path cannot be written, so "a selector must select
+/// something" is a fact about the type rather than a check somebody has to
+/// remember. It also leaves nowhere to put a leading combinator — `> button`
+/// has no meaning here and now cannot be represented, rather than being
+/// represented and ignored.
 ///
 /// [`Query::index`] is how a caller disambiguates a many-match query: `None`
 /// requires a unique match and fails [`Failure::Ambiguous`] otherwise, while
 /// `Some(i)` takes the zero-based i-th candidate in document order — the order
 /// `waypuppet tree` prints, so an index selects the same node a human would
-/// count.
+/// count. It is deliberately not part of the text grammar: CSS's `:nth-child()`
+/// is one-based and counts siblings, and this is neither.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Query {
-    /// Root-to-target predicates. Non-empty; an empty path is
-    /// [`Failure::BadQuery`].
-    pub path: Vec<Predicate>,
-    /// Which match of the final predicate to take. `None` requires a unique
-    /// match; `Some(i)` takes the zero-based i-th in document order.
+    /// The leftmost predicate, matched anywhere at or below the root.
+    pub first: Predicate,
+    /// Later steps, each relating to the previous match.
+    #[serde(default)]
+    pub rest: Vec<Step>,
+    /// Which match to take. `None` requires a unique match; `Some(i)` takes the
+    /// zero-based i-th in document order.
+    #[serde(default)]
     pub index: Option<usize>,
 }
 
@@ -311,9 +410,11 @@ pub struct Query {
 /// Carried by [`Failure::Ambiguous`] so a caller — or an agent — can see what
 /// matched and narrow the query. Not a full [`Node`]: the subtree under a match
 /// is noise when the job is telling two matches apart. The `path` is the
-/// *full* ancestor chain as [`Predicate`] steps, root to parent, so a caller
-/// can append this node's own role/name and write a [`Query`] that selects it
-/// alone.
+/// *full* ancestor chain as [`Predicate`]s, root to parent — a direct-child
+/// chain, so joining it with [`Combinator::Child`] and appending this node's own
+/// role and name yields a [`Query`] that selects this position alone. The
+/// diagnostic is constructive: a caller does not have to invent the narrower
+/// query, only choose between the ones it was handed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Match {
     /// This node's actual role.
@@ -401,9 +502,17 @@ pub enum Failure {
     /// The accessibility tree could not be read.
     #[error("cannot read the accessibility tree: {0}")]
     Tree(String),
-    /// A selector query is malformed (e.g. an empty path). Reported by the CLI
-    /// parser where it can be; re-checked here so an LLM emitting the
-    /// [`Query`] structure directly — bypassing the parser — still gets one.
+    /// A selector could not be understood.
+    ///
+    /// Carries the rendered parse error — which names the offending text, where
+    /// it was, and what to write instead — rather than a bare "syntax error".
+    /// That message is the whole interface for a caller who wrote a selector by
+    /// hand or generated one, so it is the thing under test in
+    /// `waypuppet-select`'s property suite rather than an afterthought.
+    ///
+    /// Also reachable without the parser: a caller may send the [`Query`]
+    /// structure directly as JSON, so the semantic checks the parser makes —
+    /// an unknown AT-SPI role above all — are made again on what arrives.
     #[error("malformed selector: {0}")]
     BadQuery(String),
     /// A selector matched no node.

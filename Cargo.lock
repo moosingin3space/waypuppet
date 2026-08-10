@@ -89,6 +89,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "arbitrary"
+version = "1.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3d036a3c4ab069c7b410a2ce876bd74808d2d0888a82667669f8e783a898bf1"
+
+[[package]]
+name = "arbtest"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2a3be567977128c0f71ad1462d9624ccda712193d124e944252f0c5789a06d46"
+dependencies = [
+ "arbitrary",
+]
+
+[[package]]
 name = "async-broadcast"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2101,6 +2116,7 @@ dependencies = [
  "wayland-client",
  "wayland-protocols",
  "waypuppet-proto",
+ "waypuppet-select",
  "zbus",
 ]
 
@@ -2111,6 +2127,14 @@ dependencies = [
  "serde",
  "tarpc",
  "thiserror",
+]
+
+[[package]]
+name = "waypuppet-select"
+version = "0.1.0"
+dependencies = [
+ "arbtest",
+ "waypuppet-proto",
 ]
 
 [[package]]
