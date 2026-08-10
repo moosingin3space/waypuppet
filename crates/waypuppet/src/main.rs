@@ -274,10 +274,18 @@ enum Command {
 
     /// Print the accessibility tree the application publishes.
     ///
+    /// With `--selectors`, each line carries the shortest selector that picks
+    /// that widget and nothing else — so driving the application is a matter of
+    /// copying one rather than composing it.
+    ///
     /// A semantic view of the window: roles, names and bounds, rather than
     /// pixels. Toolkits built on AccessKit — freya among them — publish one
     /// without being asked.
-    Tree,
+    Tree {
+        /// Print the shortest selector for each widget alongside it.
+        #[arg(long)]
+        selectors: bool,
+    },
 }
 
 /// What to do with a selection.
@@ -461,7 +469,7 @@ async fn dispatch(cli: Cli) -> ExitCode {
         Command::Resize { size, window } => resize(&socket, &size, window).await,
         Command::Wait { condition, timeout } => wait(&socket, condition, timeout, cli.json).await,
         Command::Clipboard { action } => clipboard(&socket, action).await,
-        Command::Tree => tree(&socket, cli.json).await,
+        Command::Tree { selectors } => tree(&socket, selectors, cli.json).await,
     };
 
     match outcome {
@@ -907,7 +915,7 @@ async fn clipboard(socket: &Path, action: ClipboardAction) -> Result<ExitCode, S
 }
 
 /// Print the application's accessibility tree.
-async fn tree(socket: &Path, json: bool) -> Result<ExitCode, String> {
+async fn tree(socket: &Path, selectors: bool, json: bool) -> Result<ExitCode, String> {
     let session = client::connect(socket).await?;
     let root = session
         .tree(client::deadline(client::DEADLINE), Target::Focused)
@@ -915,13 +923,25 @@ async fn tree(socket: &Path, json: bool) -> Result<ExitCode, String> {
         .map_err(|error| error.to_string())?
         .map_err(|failure| failure.to_string())?;
 
-    if json {
-        println!(
+    match (json, selectors) {
+        // The nested tree, as the application published it.
+        (true, false) => println!(
             "{}",
             serde_json::to_string(&root).map_err(|error| error.to_string())?
-        );
-    } else {
-        print_node(&root, 0);
+        ),
+        // Flat, with a selector per entry, because that is the shape the
+        // question has when selectors are what is wanted: "what is here, and
+        // how do I name it?" is a list, not a tree — and `depth` keeps the
+        // structure available to anything that still wants it.
+        (true, true) => {
+            let mut entries = Vec::new();
+            collect_entries(&root, &root, &mut Vec::new(), &mut entries);
+            println!(
+                "{}",
+                serde_json::to_string(&entries).map_err(|error| error.to_string())?
+            );
+        }
+        (false, _) => print_node(&root, &root, &mut Vec::new(), selectors),
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -931,8 +951,13 @@ async fn tree(socket: &Path, json: bool) -> Result<ExitCode, String> {
 /// Bounds are printed in the same coordinates `click --at` takes, which is the
 /// whole point of having them: a selector that resolves to a rectangle should
 /// be one `--at` away from being clicked.
-fn print_node(node: &waypuppet_proto::Node, depth: usize) {
-    let indent = "  ".repeat(depth);
+fn print_node<'a>(
+    root: &'a waypuppet_proto::Node,
+    node: &'a waypuppet_proto::Node,
+    ancestors: &mut Vec<&'a waypuppet_proto::Node>,
+    selectors: bool,
+) {
+    let indent = "  ".repeat(ancestors.len());
     let name = node
         .name
         .as_ref()
@@ -943,10 +968,47 @@ fn print_node(node: &waypuppet_proto::Node, depth: usize) {
             bounds.origin.x, bounds.origin.y, bounds.size.width, bounds.size.height
         )
     });
-    println!("{indent}{}{name}{bounds}", node.role);
+    let selector = if selectors {
+        let unique = waypuppet_select::identify(root, ancestors, node);
+        match unique.index {
+            Some(index) => format!("  → {} --index {index}", unique.selector),
+            None => format!("  → {}", unique.selector),
+        }
+    } else {
+        String::new()
+    };
+    println!("{indent}{}{name}{bounds}{selector}", node.role);
+
+    ancestors.push(node);
     for child in &node.children {
-        print_node(child, depth + 1);
+        print_node(root, child, ancestors, selectors);
     }
+    ancestors.pop();
+}
+
+/// The flat `--json --selectors` form, in the same document order everything
+/// else uses.
+fn collect_entries<'a>(
+    root: &'a waypuppet_proto::Node,
+    node: &'a waypuppet_proto::Node,
+    ancestors: &mut Vec<&'a waypuppet_proto::Node>,
+    out: &mut Vec<serde_json::Value>,
+) {
+    let unique = waypuppet_select::identify(root, ancestors, node);
+    out.push(serde_json::json!({
+        "selector": unique.selector,
+        "index": unique.index,
+        "depth": ancestors.len(),
+        "role": node.role,
+        "name": node.name,
+        "bounds": node.bounds,
+    }));
+
+    ancestors.push(node);
+    for child in &node.children {
+        collect_entries(root, child, ancestors, out);
+    }
+    ancestors.pop();
 }
 
 /// Everything on stdin, for `clipboard set --stdin`.

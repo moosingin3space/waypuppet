@@ -529,14 +529,16 @@ against the developer's desktop. 261 nodes out of `gtk3-widget-factory`, with ro
 and bounds in the coordinates `click --at` takes.
 
 Selectors work end to end. `click --on 'button[name="Save"]'`, `key`/`type --focus-on`,
-`--index N`, and `select` as the dry run. The grammar is a CSS subset in
-`waypuppet-select` — `dialog > button[name*="Save" i]:not([name="Cancel"])` — resolved on
+`--index N`, `select` as the dry run, and `tree --selectors`, which puts the shortest
+selector for each widget beside it so a caller copies rather than composes. The grammar is
+a CSS subset in `waypuppet-select` — `dialog > button[name*="Save" i]:not([name="Cancel"])`
+— resolved on
 the control thread before anything crosses the bridge, so it stays one call with one
 settle. `ci/toolkit-smoke.sh` drives `gtk3-widget-factory` by selector and checks the
 resolved point against the bounds the application itself published.
 
-Not yet: `tree --selectors`, and [plan 08](plans/08-sandbox-autonomy.md), which is what
-would let any of this be pointed at [example-app](../example-app) rather than at GTK.
+Not yet: [plan 08](plans/08-sandbox-autonomy.md), which is what would let any of this be
+pointed at [example-app](../example-app) rather than at GTK.
 
 **The roadmap lives in [`plans/`](plans/)** — one file per phase, in the order they should
 land, each with its own acceptance criteria and, once landed, what it taught us.

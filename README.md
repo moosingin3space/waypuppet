@@ -84,7 +84,27 @@ widget you can click. It needs no D-Bus on your machine: waypuppet runs the sess
 and is the accessibility registry on it, so the application registers with waypuppet rather
 than announcing itself to your desktop.
 
-And you do not have to read the coordinates off it yourself. A selector names the widget:
+And you do not have to work out how to name a widget either — `--selectors` puts the
+shortest selector for each one beside it:
+
+```
+$ waypuppet tree --selectors
+application "gtk3-widget-factory"  → application
+  frame  [0,0 1652x952]  → frame
+    panel  [26,23 1600x47]  → frame > panel --index 0
+      filler  [1499,23 121x46]  → frame > panel > filler --index 0
+        button "Minimize"  [1506,31 34x30]  → button[name="Minimize"]
+        button "Close"  [1586,31 34x30]  → button[name="Close"]
+      toggle button "Menu"  [1457,23 36x46]  → toggle-button[name="Menu"]
+      radio button "Page 1"  [644,23 121x46]  → radio-button[name="Page 1"]
+```
+
+Each is the shortest selector that picks that widget and nothing else, so driving the
+application is a matter of copying one rather than composing it. Where nothing can tell two
+widgets apart — GTK publishes a great many unnamed containers — you get an `--index`
+instead of a guess.
+
+A selector names the widget:
 
 ```
 $ waypuppet click --on 'button[name="Close"]'
@@ -191,9 +211,9 @@ to your desktop, and none of it needs a bus on the host. It reads 261 nodes out 
 `gtk3-widget-factory`.
 
 Selectors turn that tree into something to aim with: `click --on 'button[name="Save"]'`,
-`type --focus-on`, and `select` to try one first. The grammar is a subset of CSS, and what
-it does not support it refuses by name with the equivalent spelled out, rather than
-matching nothing quietly.
+`type --focus-on`, `select` to try one first, and `tree --selectors` to be handed one per
+widget. The grammar is a subset of CSS, and what it does not support it refuses by name
+with the equivalent spelled out, rather than matching nothing quietly.
 
 **Not yet.** Running your application without knowing waypuppet lives in a container —
 [plan 08](plans/08-sandbox-autonomy.md) — which is also what gates pointing any of this at

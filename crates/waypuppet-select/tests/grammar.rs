@@ -6,7 +6,7 @@
 //! support, and every one of those has its own right answer here.
 
 use waypuppet_proto::{Case, Combinator, Failure, MatchOp, Matcher, Node, Point, Rect, Size};
-use waypuppet_select::{ErrorKind, narrowed, parse, print, resolve};
+use waypuppet_select::{ErrorKind, identify, narrowed, parse, print, resolve};
 
 /// One representative input per [`ErrorKind`], and the label the exhaustive
 /// match below gives it.
@@ -430,6 +430,97 @@ fn an_ambiguous_query_hands_back_selectors_that_are_not_ambiguous() {
         narrowed(&matches[0]),
         r#"application[name="app"] > button[name="Save"]"#
     );
+}
+
+#[test]
+fn a_suggested_selector_widens_only_as_far_as_it_has_to() {
+    // The three rungs `tree --selectors` climbs, on one tree. Two panels each
+    // hold a "Save" button, and one holds a lone slider.
+    let tree = node(
+        "application",
+        Some("app"),
+        None,
+        vec![
+            node(
+                "panel",
+                Some("left"),
+                None,
+                vec![
+                    node("button", Some("Save"), Some(rect(0, 0, 10, 10)), vec![]),
+                    node("slider", None, Some(rect(0, 20, 10, 10)), vec![]),
+                ],
+            ),
+            node(
+                "panel",
+                Some("right"),
+                None,
+                vec![node(
+                    "button",
+                    Some("Save"),
+                    Some(rect(40, 0, 10, 10)),
+                    vec![],
+                )],
+            ),
+        ],
+    );
+    let at = |path: &[usize]| -> (Vec<&Node>, &Node) {
+        let mut ancestors = Vec::new();
+        let mut node = &tree;
+        for step in path {
+            ancestors.push(node);
+            node = &node.children[*step];
+        }
+        (ancestors, node)
+    };
+
+    // The role alone, because there is only one slider.
+    let (ancestors, slider) = at(&[0, 1]);
+    assert_eq!(identify(&tree, &ancestors, slider).selector, "slider");
+
+    // Role and name, because there is only one panel called "left".
+    let (ancestors, left) = at(&[0]);
+    assert_eq!(
+        identify(&tree, &ancestors, left).selector,
+        r#"panel[name="left"]"#
+    );
+
+    // Both buttons are `button[name="Save"]`, so the parent has to come in —
+    // and only the parent, not the whole path back to the root.
+    let (ancestors, save) = at(&[1, 0]);
+    let unique = identify(&tree, &ancestors, save);
+    assert_eq!(
+        unique.selector,
+        r#"panel[name="right"] > button[name="Save"]"#
+    );
+    assert_eq!(unique.index, None);
+    assert_eq!(
+        resolve(&tree, &parse(&unique.selector).unwrap()).unwrap(),
+        Point { x: 45, y: 5 }
+    );
+}
+
+#[test]
+fn indistinguishable_nodes_are_given_an_index_rather_than_a_guess() {
+    // Two siblings identical in role, name and position. No selector can tell
+    // them apart, and the honest answer is to say which one — a longer selector
+    // would look more precise and pick the wrong widget just as often.
+    let tree = node(
+        "application",
+        None,
+        None,
+        vec![
+            node("button", Some("Go"), Some(rect(0, 0, 10, 10)), vec![]),
+            node("button", Some("Go"), Some(rect(40, 0, 10, 10)), vec![]),
+        ],
+    );
+    let ancestors = vec![&tree];
+
+    let second = identify(&tree, &ancestors, &tree.children[1]);
+    assert_eq!(second.index, Some(1));
+
+    let mut query = parse(&second.selector).unwrap();
+    query.index = second.index;
+    assert_eq!(resolve(&tree, &query).unwrap(), Point { x: 45, y: 5 });
 }
 
 #[test]

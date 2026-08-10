@@ -41,9 +41,10 @@
 //! # Layout
 //!
 //! - [`parse`] — text in, [`Query`] out. The grammar.
-//! - [`print`] — [`Query`] in, text out. Also turns a [`Match`] into the
-//!   selector that would pick it alone, which is what makes an ambiguous
-//!   result constructive.
+//! - [`print`] — [`Query`] in, text out. Also [`narrowed`], which turns a
+//!   [`Match`] into the selector that would pick it alone (what makes an
+//!   ambiguous result constructive), and [`identify`], which finds the shortest
+//!   selector for a node in a tree (what makes `tree --selectors` possible).
 //! - [`resolve`] — a [`Query`] and a tree in, a click point or a named failure
 //!   out.
 //! - [`validate`] — the semantic checks, for structure that arrived as JSON and
@@ -65,6 +66,6 @@ mod validate;
 
 pub use error::{ErrorKind, ParseError};
 pub use parse::parse;
-pub use print::{narrowed, print};
+pub use print::{Unique, identify, narrowed, print};
 pub use resolve::{candidates, resolve};
 pub use validate::validate;

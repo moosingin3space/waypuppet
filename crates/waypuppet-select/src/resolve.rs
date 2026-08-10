@@ -176,7 +176,7 @@ fn to_match(target: &Node, ancestors: &[&Node]) -> Match {
 }
 
 /// A node as the predicate that matches exactly it.
-fn identity(node: &Node) -> Predicate {
+pub(crate) fn identity(node: &Node) -> Predicate {
     Predicate {
         role: Some(Matcher::Matches {
             op: MatchOp::Exact,

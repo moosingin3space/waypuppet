@@ -15,9 +15,10 @@
 #   4. `tree` names a widget                          — the a11y bus and registry work
 #   5. `click` and `type` return successfully         — they settled, so the client drew
 #   6. the capture changes as a result                — the input actually reached the app
-#   7. a selector resolves to the widget's own bounds — the tree and the grammar agree
-#   8. `click --on` and `type --focus-on` drive it    — selectors reach a real toolkit
-#   9. a bad selector is refused, by name             — the diagnostics are load-bearing
+#   7. `tree --selectors` suggests one per widget     — the guidance an agent copies
+#   8. the suggestion resolves to that widget's bounds — the suggestion is trustworthy
+#   9. `click --on` and `type --focus-on` drive it    — selectors reach a real toolkit
+#  10. a bad selector is refused, by name             — the diagnostics are load-bearing
 #
 # (6) is the one that matters most. Without a seat, or without frame callbacks, the others
 # either fail outright or the picture never changes.
@@ -26,17 +27,19 @@
 # the accessibility handshake and then publish nothing, with no error on either side. The
 # only way to know is to read a node out — see plan 07.
 #
-# (7) is the one selectors need, and it is why `select` exists as a verb. `click --on` is
+# (8) is the one selectors need, and it is why `select` exists as a verb. `click --on` is
 # deliberately a single call — resolve and click, with no gap for the layout to move in —
-# which leaves no way to see *where* it decided to click. So the check is: read a widget's
-# bounds out of the tree, ask `select` for the same widget, and assert the point it returns
-# lies inside them. A resolver that returned a plausible-looking wrong point would pass a
-# test that only checked "the click worked", because clicking almost anywhere in a widget
-# factory does something.
+# which leaves no way to see *where* it decided to click. So the check is: take a widget's
+# bounds and waypuppet's own suggested selector for it out of `tree --selectors`, ask
+# `select` where that selector points, and assert it is the centre of those bounds. A
+# resolver returning a plausible-looking wrong point would pass a test that only checked
+# "the click worked", because clicking almost anywhere in a widget factory does something.
 #
-# Nothing below hard-codes a widget name. The names come out of the tree at runtime, for
-# the same reason the title check matches `.` rather than GTK's wording: a smoke test that
-# fails when the application is upgraded is a smoke test people learn to ignore.
+# Nothing below composes a selector, and nothing hard-codes a widget name. Both come out of
+# the tree at runtime — the selector because `--selectors` exists precisely so that callers
+# do not have to write one, so following its advice is the honest way to test it, and the
+# name for the same reason the title check matches `.` rather than GTK's wording: a smoke
+# test that fails when the application is upgraded is one people learn to ignore.
 #
 # Note what is absent: there is no `sleep` anywhere below. Every step blocks on a fact the
 # session observed, which is the property waypuppet exists to provide and the fastest way
@@ -115,42 +118,37 @@ echo "smoke: tree has $(wc -l < "$out/tree.txt") nodes"
 
 # ------------------------------------------------------------------ selectors
 
-# Pull a button out of the tree that is big enough to click and whose name is
-# unique among buttons, so `button[name="…"]` has exactly one match. Nothing is
-# hard-coded: the name comes from whatever this GTK release happens to publish.
+# Take a widget *and the selector waypuppet suggested for it* straight out of
+# `tree --selectors`. Nothing here composes a selector, which is the point:
+# `--selectors` exists so that a caller does not have to, and the way to find out
+# whether that guidance is good is to follow it rather than to reimplement it.
 #
-# Document order decides ties, so the same tree always yields the same widget —
-# a smoke test that picks a different target each run reports flakes that are
-# its own.
-pick_button() {
-    sed -n 's/^ *button "\([^"\\|]*\)"  \[\(-*[0-9]*\),\(-*[0-9]*\) \([0-9]*\)x\([0-9]*\)\]$/\1|\2|\3|\4|\5/p' "$1" \
-    | awk -F'|' '
-        $4 > 8 && $5 > 8 {
-            if (!($1 in count)) { order[++n] = $1 }
-            count[$1]++
-            line[$1] = $0
-        }
-        END {
-            for (i = 1; i <= n; i++) {
-                if (count[order[i]] == 1) { print line[order[i]]; exit }
-            }
-        }'
+# Wanted: a button big enough to click whose suggestion stands on its own — no
+# `--index`, since a suggestion needing one is still correct but is not what this
+# check is about. Document order decides, so the same tree always yields the same
+# widget; a smoke test that picks a different target each run reports flakes that
+# are its own.
+pick_suggested() {
+    sed -n 's/^ *button "[^"]*"  \[\(-*[0-9]*\),\(-*[0-9]*\) \([0-9]*\)x\([0-9]*\)]  → \(.*\)$/\1|\2|\3|\4|\5/p' "$1" \
+    | awk -F'|' '$3 > 8 && $4 > 8 && $0 !~ /--index/ { print; exit }'
 }
 
-widget=$(pick_button "$out/tree.txt")
+waypuppet tree --selectors > "$out/tree-selectors.txt"
+widget=$(pick_suggested "$out/tree-selectors.txt")
 if [ -z "$widget" ]; then
-    echo "smoke: no uniquely named button with usable bounds in the tree" >&2
-    grep '^ *button' "$out/tree.txt" | head -20 >&2
+    echo "smoke: --selectors suggested nothing usable for any button" >&2
+    grep '^ *button' "$out/tree-selectors.txt" | head -20 >&2
     exit 1
 fi
 
-name=$(printf '%s' "$widget" | cut -d'|' -f1)
-bx=$(printf '%s' "$widget" | cut -d'|' -f2)
-by=$(printf '%s' "$widget" | cut -d'|' -f3)
-bw=$(printf '%s' "$widget" | cut -d'|' -f4)
-bh=$(printf '%s' "$widget" | cut -d'|' -f5)
-selector="button[name=\"$name\"]"
-echo "smoke: resolving $selector"
+bx=$(printf '%s' "$widget" | cut -d'|' -f1)
+by=$(printf '%s' "$widget" | cut -d'|' -f2)
+bw=$(printf '%s' "$widget" | cut -d'|' -f3)
+bh=$(printf '%s' "$widget" | cut -d'|' -f4)
+# The last field, taken with `-f5-`, so a selector containing the separator
+# survives being pulled back out.
+selector=$(printf '%s' "$widget" | cut -d'|' -f5-)
+echo "smoke: --selectors suggested $selector"
 
 # The assertion selectors actually need. `click --on` is one call by design —
 # resolve and click, with no gap for the layout to move — so it cannot report
@@ -233,11 +231,11 @@ echo "smoke: click --on drove the application"
 # `--focus-on` against a tree read *now*, because the click above may well have
 # changed the layout — which is the whole reason resolution happens server side,
 # one call at a time, instead of in the caller.
-waypuppet tree > "$out/tree2.txt"
-widget2=$(pick_button "$out/tree2.txt")
+waypuppet tree --selectors > "$out/tree-selectors2.txt"
+widget2=$(pick_suggested "$out/tree-selectors2.txt")
 if [ -n "$widget2" ]; then
-    name2=$(printf '%s' "$widget2" | cut -d'|' -f1)
-    waypuppet type 'hi' --focus-on "button[name=\"$name2\"]"
+    selector2=$(printf '%s' "$widget2" | cut -d'|' -f5-)
+    waypuppet type 'hi' --focus-on "$selector2"
     echo "smoke: type --focus-on resolved, focused and settled"
 fi
 

@@ -31,7 +31,9 @@ use arbtest::arbtest;
 use waypuppet_proto::{
     Case, Combinator, Failure, MatchOp, Matcher, Node, Point, Predicate, Query, Rect, Size, Step,
 };
-use waypuppet_select::{ErrorKind, candidates, narrowed, parse, print, resolve, roles, validate};
+use waypuppet_select::{
+    ErrorKind, candidates, identify, narrowed, parse, print, resolve, roles, validate,
+};
 
 #[test]
 fn printing_a_query_and_parsing_it_back_is_the_identity() {
@@ -266,6 +268,80 @@ fn the_selectors_an_ambiguous_result_hands_back_parse_and_resolve() {
         Ok(())
     })
     .budget_ms(3_000);
+}
+
+#[test]
+fn the_selector_offered_for_a_node_selects_that_node() {
+    // What `tree --selectors` promises, on every line of it. A suggested
+    // selector that picks a *different* widget is worse than no suggestion:
+    // the caller has no reason to doubt it, and the click lands somewhere
+    // plausible. So the claim is checked the whole way round — printed,
+    // re-parsed as text, and resolved back to the node it came from.
+    arbtest(|u| {
+        let tree = any_tree(u, 3)?;
+        let mut every = Vec::new();
+        walk(&tree, &mut Vec::new(), &mut every);
+
+        for (node, ancestors) in &every {
+            let unique = identify(&tree, ancestors, node);
+            let mut query = parse(&unique.selector)
+                .unwrap_or_else(|error| panic!("{:?} does not parse: {error}", unique.selector));
+            query.index = unique.index;
+
+            let found = candidates(&tree, &query);
+            match unique.index {
+                // No index means the selector stands alone, and that is a
+                // claim about the whole tree, not just about this node.
+                None => assert!(
+                    found.len() == 1 && std::ptr::eq(found[0].0, *node),
+                    "{:?} was offered as unique but matches {} nodes",
+                    unique.selector,
+                    found.len()
+                ),
+                Some(index) => assert!(
+                    found
+                        .get(index)
+                        .is_some_and(|(at, _)| std::ptr::eq(*at, *node)),
+                    "{:?} --index {index} does not select the node it was built from",
+                    unique.selector
+                ),
+            }
+        }
+        Ok(())
+    })
+    .budget_ms(3_000);
+}
+
+#[test]
+fn a_suggested_selector_is_as_short_as_it_can_be() {
+    // The other half: correct is not enough, because the fully anchored path is
+    // always correct and nobody would read one. If a shorter rung would have
+    // done, this catches a ladder that skipped it.
+    arbtest(|u| {
+        let tree = any_tree(u, 3)?;
+        let mut every = Vec::new();
+        walk(&tree, &mut Vec::new(), &mut every);
+
+        for (node, ancestors) in &every {
+            let unique = identify(&tree, ancestors, node);
+            if unique.index.is_some() {
+                continue;
+            }
+            // The role alone is the shortest rung there is. If it happens to be
+            // unique, nothing longer should have been offered.
+            let role_only = format!("[role=\"{}\"]", node.role);
+            let bare = parse(&role_only).expect("a role out of a real tree parses");
+            if candidates(&tree, &bare).len() == 1 {
+                assert_eq!(
+                    unique.selector,
+                    print(&bare),
+                    "a unique role was passed over for something longer"
+                );
+            }
+        }
+        Ok(())
+    })
+    .budget_ms(2_000);
 }
 
 // --- generators -------------------------------------------------------------

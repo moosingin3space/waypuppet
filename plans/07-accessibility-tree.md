@@ -280,9 +280,31 @@ selector that would select it alone. Against the real tree that is 21 buttons, e
 pasteable selector and its bounds — which is the constructive diagnostic finally reaching
 somebody.
 
-**Still to do:** `waypuppet tree --selectors`, printing a minimal unique selector beside
-each node so a caller copies rather than composes. The printer makes it cheap; it just is
-not written.
+**`tree --selectors` is the guidance, and it changes what generating a selector *is*.**
+Every line carries the shortest selector picking that widget and nothing else, so the
+common case stops being composition and becomes copying — no working out whether a name is
+unique, whether an ancestor step is needed, or how a role with a space in it is spelled.
+
+The rule that produces it is one sentence: **the shortest rung that is as precise as any.**
+The ladder is role, then role and name, then ancestors as `>` steps; each rung only ever
+matches fewer nodes, so the answer is the first to reach the lowest count the ladder
+reaches. Where that is one, it reads as "the shortest unique selector". Where it is not —
+GTK publishes a great many unnamed `filler`s — the `--index` does the last of the work and a
+longer path in front of it would be *no more precise* while being harder to read. That
+unification came from looking at the real output: the first version always climbed to the
+full path before falling back to an index, which turned 156 of 261 lines into 70-character
+paths ending in `--index 0`. `application[name="gtk3-widget-factory"] > frame > panel
+--index 0` became `frame > panel --index 0`, and nothing was lost.
+
+Two properties defend it, and both were broken to check. That the suggestion *selects the
+node it was built from* — printed, re-parsed as text, resolved back — because a suggestion
+picking a different widget is worse than none: the caller has no reason to doubt it and the
+click lands somewhere plausible. And that it is *as short as it can be*, because correct
+alone is satisfied by the fully anchored path, which nobody would read.
+
+`--json --selectors` emits a flat array rather than the nested tree, because that is the
+shape the question has once selectors are what is wanted: "what is here, and how do I name
+it?" is a list. `depth` keeps the structure for anything that still wants it.
 
 **Deferred, and named in the error rather than silently missing.** `#id` maps to AT-SPI's
 accessible id and `:checked`/`:disabled`/`:focus` map almost one-to-one onto AT-SPI states
