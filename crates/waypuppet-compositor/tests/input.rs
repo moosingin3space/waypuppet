@@ -62,6 +62,7 @@ fn chords_arrive_as_the_right_keysyms_in_order() {
                 "ctrl+shift+t".to_owned(),
                 "Return".to_owned(),
             ],
+            focus: None,
             reply,
         });
 
@@ -104,6 +105,7 @@ fn typed_text_arrives_a_character_at_a_time() {
 
         harness.deliver("typing to settle", SETTLE, |reply| Command::Write {
             text: "Hi!".to_owned(),
+            focus: None,
             reply,
         });
 
@@ -138,6 +140,7 @@ fn a_character_the_layout_cannot_type_fails_before_anything_is_sent() {
             // The `a` is typeable and the ideograph is not. If the failure came
             // halfway through, the client would have received the `a`.
             text: "a漢".to_owned(),
+            focus: None,
             reply,
         });
 
@@ -149,6 +152,83 @@ fn a_character_the_layout_cannot_type_fails_before_anything_is_sent() {
             harness.input(&mut client),
             Vec::new(),
             "nothing should have been typed: half a string is worse than none",
+        );
+
+        harness.stop(client);
+    });
+}
+
+#[test]
+fn focusing_first_clicks_the_point_before_typing() {
+    // `--focus-on` resolves a selector to a point and this is what happens to
+    // it. Keyboard focus *within* a window is the toolkit's own state, not the
+    // seat's, so the lever is a click — and the plan left "is a click actually
+    // the right lever" open until it could be watched against a real client.
+    //
+    // Order is the whole assertion. A click delivered after the keys would still
+    // produce every event this test looks for and would focus the widget just in
+    // time to miss the text, which is a bug no count of events can see.
+    fixture::guarded("input-focus-on", OUTPUT, |harness| {
+        let mut client = ready(harness);
+
+        harness.deliver("typing with a focus point", SETTLE, |reply| {
+            Command::Write {
+                text: "hi".to_owned(),
+                focus: Some(Point { x: 40, y: 30 }),
+                reply,
+            }
+        });
+
+        let input = harness.input(&mut client);
+        let first_key = input
+            .iter()
+            .position(|event| matches!(event, Input::Key { .. }))
+            .expect("the text should have been typed");
+        let last_button = input
+            .iter()
+            .rposition(|event| matches!(event, Input::Button { code: 0x110, .. }))
+            .expect("focusing should have clicked");
+        assert!(
+            last_button < first_key,
+            "the focus click has to land before the text, not after it: {input:?}",
+        );
+        assert!(
+            input
+                .iter()
+                .take(last_button)
+                .any(|event| matches!(event, Input::Motion { x: 40, y: 30 })),
+            "the focus click should have moved the pointer there first: {input:?}",
+        );
+
+        harness.stop(client);
+    });
+}
+
+#[test]
+fn a_chord_that_does_not_parse_leaves_the_focus_alone() {
+    // The all-or-nothing rule, extended to the click `--focus-on` adds. A
+    // rejected chord must not move the application's focus on its way out:
+    // half-performed is worse than not performed, and a caller who mistyped a
+    // chord would otherwise have to undo a click they never asked for.
+    fixture::guarded("input-focus-rejected", OUTPUT, |harness| {
+        let mut client = ready(harness);
+
+        let reply = harness.deliver("an unmappable chord", SETTLE, |reply| Command::Key {
+            chords: vec!["ctrl+nonesuch".to_owned()],
+            focus: Some(Point { x: 40, y: 30 }),
+            reply,
+        });
+        assert!(
+            matches!(reply, Some(Err(Failure::UnmappableChord { .. }))),
+            "{reply:?}",
+        );
+
+        let input = harness.input(&mut client);
+        assert!(
+            !input
+                .iter()
+                .any(|event| matches!(event, Input::Button { .. } | Input::Key { .. })),
+            "nothing should have been delivered at all: {input:?}",
         );
 
         harness.stop(client);
@@ -224,6 +304,7 @@ fn a_verb_returns_once_the_client_has_drawn() {
         // never waited for anything.
         let unanswered = harness.deliver("a key with no repaint", SETTLE, |reply| Command::Key {
             chords: vec!["a".to_owned()],
+            focus: None,
             reply,
         });
         assert!(
@@ -244,6 +325,7 @@ fn a_verb_returns_once_the_client_has_drawn() {
             .commands()
             .send(Command::Key {
                 chords: vec!["b".to_owned()],
+                focus: None,
                 reply: reply_tx,
             })
             .expect("the compositor is listening");
@@ -281,6 +363,7 @@ fn a_window_that_goes_away_fails_its_parked_replies_at_once() {
             .commands()
             .send(Command::Key {
                 chords: vec!["a".to_owned()],
+                focus: None,
                 reply: reply_tx,
             })
             .expect("the compositor is listening");
@@ -310,6 +393,7 @@ fn input_with_no_window_is_refused_rather_than_parked() {
         // happen.
         let outcome = harness.deliver("a key with no window", SETTLE, |reply| Command::Key {
             chords: vec!["a".to_owned()],
+            focus: None,
             reply,
         });
 

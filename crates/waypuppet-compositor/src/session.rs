@@ -31,8 +31,8 @@ use tarpc::{
 };
 use tokio::sync::Notify;
 use waypuppet_proto::{
-    Button, Capture, ClientState, Condition, Cursor, Failure, LogChunk, Node, Point, Selection,
-    SessionStatus, Settled, Size, Target, Waypuppet,
+    Button, Capture, ClientState, Condition, Cursor, Failure, Locator, LogChunk, Node, Point,
+    Selection, SessionStatus, Settled, Size, Target, Waypuppet,
 };
 
 use crate::{Command, Commands, Compositor, Config, Error, Watching, a11y, a11y::Accessibility};
@@ -421,6 +421,46 @@ impl Server {
         self.0.capture_dir.join(format!("waypuppet-{n:04}.png"))
     }
 
+    /// Turn a [`Locator`] into the point an input verb should land on.
+    ///
+    /// This is where selectors stop existing. The tree lives on this thread and
+    /// the seat lives on the compositor's, so resolution happens here and the
+    /// bridge carries an ordinary `Option<Point>` — the compositor never hears
+    /// of a query, exactly as it never hears of D-Bus.
+    ///
+    /// Resolving here rather than in the CLI is what makes `click --on` one
+    /// call. The alternative — read the tree, find the node, call `click --at`
+    /// — is a round trip with a window in the middle for the layout to move,
+    /// which is the race this project exists to remove.
+    ///
+    /// [`validate`] runs even though the CLI's parser has already checked
+    /// anything it parsed: a caller may send the [`Query`] structure directly as
+    /// JSON and never meet that parser. It also canonicalises, so both doors
+    /// arrive at the same representation.
+    ///
+    /// [`validate`]: waypuppet_select::validate
+    /// [`Query`]: waypuppet_proto::Query
+    async fn locate(&self, locator: Option<Locator>) -> Result<Option<Point>, Failure> {
+        match locator {
+            None => Ok(None),
+            Some(Locator::At(point)) => Ok(Some(point)),
+            Some(Locator::On(query)) => {
+                let query = waypuppet_select::validate(&query)?;
+                let a11y = self
+                    .0
+                    .a11y
+                    .as_ref()
+                    .map_err(|why| Failure::Tree(why.clone()))?;
+                // `NoTree` propagates as itself: a session where nothing has
+                // registered is not a selector that failed to match, and a
+                // caller reacts to the two differently — one waits, the other
+                // rewrites the query.
+                let tree = a11y.tree().await?;
+                waypuppet_select::resolve(&tree, &query).map(Some)
+            }
+        }
+    }
+
     /// Block until the child exits, which only this thread can see.
     ///
     /// The compositor's registry cannot answer this one: a process may exit
@@ -550,17 +590,32 @@ impl Waypuppet for Server {
     // between. That is the property waypuppet exists for, and it lives here
     // rather than in each caller.
 
-    async fn key(self, _: Context, chords: Vec<String>) -> Result<(), Failure> {
+    async fn key(
+        self,
+        _: Context,
+        chords: Vec<String>,
+        focus: Option<Locator>,
+    ) -> Result<(), Failure> {
+        let focus = self.locate(focus).await?;
         self.0
             .commands
-            .settle(SETTLE_DEADLINE, |reply| Command::Key { chords, reply })
+            .settle(SETTLE_DEADLINE, |reply| Command::Key {
+                chords,
+                focus,
+                reply,
+            })
             .await
     }
 
-    async fn write(self, _: Context, text: String) -> Result<(), Failure> {
+    async fn write(self, _: Context, text: String, focus: Option<Locator>) -> Result<(), Failure> {
+        let focus = self.locate(focus).await?;
         self.0
             .commands
-            .settle(SETTLE_DEADLINE, |reply| Command::Write { text, reply })
+            .settle(SETTLE_DEADLINE, |reply| Command::Write {
+                text,
+                focus,
+                reply,
+            })
             .await
     }
 
@@ -578,10 +633,11 @@ impl Waypuppet for Server {
     async fn click(
         self,
         _: Context,
-        at: Option<Point>,
+        locator: Option<Locator>,
         button: Button,
         target: Target,
     ) -> Result<(), Failure> {
+        let at = self.locate(locator).await?;
         self.0
             .commands
             .settle(SETTLE_DEADLINE, |reply| Command::Click {

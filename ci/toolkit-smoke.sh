@@ -15,6 +15,9 @@
 #   4. `tree` names a widget                          — the a11y bus and registry work
 #   5. `click` and `type` return successfully         — they settled, so the client drew
 #   6. the capture changes as a result                — the input actually reached the app
+#   7. a selector resolves to the widget's own bounds — the tree and the grammar agree
+#   8. `click --on` and `type --focus-on` drive it    — selectors reach a real toolkit
+#   9. a bad selector is refused, by name             — the diagnostics are load-bearing
 #
 # (6) is the one that matters most. Without a seat, or without frame callbacks, the others
 # either fail outright or the picture never changes.
@@ -22,6 +25,18 @@
 # (4) is here because the failure it guards against is silent: an application can complete
 # the accessibility handshake and then publish nothing, with no error on either side. The
 # only way to know is to read a node out — see plan 07.
+#
+# (7) is the one selectors need, and it is why `select` exists as a verb. `click --on` is
+# deliberately a single call — resolve and click, with no gap for the layout to move in —
+# which leaves no way to see *where* it decided to click. So the check is: read a widget's
+# bounds out of the tree, ask `select` for the same widget, and assert the point it returns
+# lies inside them. A resolver that returned a plausible-looking wrong point would pass a
+# test that only checked "the click worked", because clicking almost anywhere in a widget
+# factory does something.
+#
+# Nothing below hard-codes a widget name. The names come out of the tree at runtime, for
+# the same reason the title check matches `.` rather than GTK's wording: a smoke test that
+# fails when the application is upgraded is a smoke test people learn to ignore.
 #
 # Note what is absent: there is no `sleep` anywhere below. Every step blocks on a fact the
 # session observed, which is the property waypuppet exists to provide and the fastest way
@@ -97,6 +112,134 @@ if ! grep -q "^  frame" "$out/tree.txt"; then
     exit 1
 fi
 echo "smoke: tree has $(wc -l < "$out/tree.txt") nodes"
+
+# ------------------------------------------------------------------ selectors
+
+# Pull a button out of the tree that is big enough to click and whose name is
+# unique among buttons, so `button[name="…"]` has exactly one match. Nothing is
+# hard-coded: the name comes from whatever this GTK release happens to publish.
+#
+# Document order decides ties, so the same tree always yields the same widget —
+# a smoke test that picks a different target each run reports flakes that are
+# its own.
+pick_button() {
+    sed -n 's/^ *button "\([^"\\|]*\)"  \[\(-*[0-9]*\),\(-*[0-9]*\) \([0-9]*\)x\([0-9]*\)\]$/\1|\2|\3|\4|\5/p' "$1" \
+    | awk -F'|' '
+        $4 > 8 && $5 > 8 {
+            if (!($1 in count)) { order[++n] = $1 }
+            count[$1]++
+            line[$1] = $0
+        }
+        END {
+            for (i = 1; i <= n; i++) {
+                if (count[order[i]] == 1) { print line[order[i]]; exit }
+            }
+        }'
+}
+
+widget=$(pick_button "$out/tree.txt")
+if [ -z "$widget" ]; then
+    echo "smoke: no uniquely named button with usable bounds in the tree" >&2
+    grep '^ *button' "$out/tree.txt" | head -20 >&2
+    exit 1
+fi
+
+name=$(printf '%s' "$widget" | cut -d'|' -f1)
+bx=$(printf '%s' "$widget" | cut -d'|' -f2)
+by=$(printf '%s' "$widget" | cut -d'|' -f3)
+bw=$(printf '%s' "$widget" | cut -d'|' -f4)
+bh=$(printf '%s' "$widget" | cut -d'|' -f5)
+selector="button[name=\"$name\"]"
+echo "smoke: resolving $selector"
+
+# The assertion selectors actually need. `click --on` is one call by design —
+# resolve and click, with no gap for the layout to move — so it cannot report
+# where it landed, and a resolver returning a plausible wrong point would still
+# make something happen in a widget factory. `select` is the dry run that makes
+# the answer checkable, against bounds that came from the application itself.
+point=$(waypuppet select "$selector")
+want="$((bx + bw / 2)),$((by + bh / 2))"
+if [ "$point" != "$want" ]; then
+    echo "smoke: $selector resolved to $point, but the tree puts it at $want" >&2
+    echo "smoke: the grammar and the tree disagree about where this widget is" >&2
+    exit 1
+fi
+echo "smoke: resolved to $point, the centre of the widget's own bounds"
+
+# A selector that matches many has to say so *usefully*: the count is not the
+# point, the list of narrowed selectors is, because that is what a caller — or
+# an agent — does next. Guarded on there being several, so this does not become
+# a test of how many buttons GTK ships.
+buttons=$(grep -c '^ *button ' "$out/tree.txt" || true)
+if [ "$buttons" -gt 1 ]; then
+    if waypuppet select 'button' >"$out/ambiguous.txt" 2>&1; then
+        echo "smoke: 'button' matched $buttons nodes and was not reported as ambiguous" >&2
+        exit 1
+    fi
+    if ! grep -q -- '--index' "$out/ambiguous.txt"; then
+        echo "smoke: an ambiguous selector did not say how to disambiguate" >&2
+        cat "$out/ambiguous.txt" >&2
+        exit 1
+    fi
+    if ! grep -q '^ *\[0\] ' "$out/ambiguous.txt"; then
+        echo "smoke: an ambiguous selector listed no matches to choose between" >&2
+        cat "$out/ambiguous.txt" >&2
+        exit 1
+    fi
+    # And the way out of it works: the same selector with an index resolves.
+    waypuppet select 'button' --index 0 >/dev/null
+    echo "smoke: ambiguity reported $buttons matches, and --index resolves one"
+fi
+
+# The diagnostics are load-bearing here, not decoration: the whole argument for
+# refusing an unknown role at parse time rather than returning no match is that
+# the caller is told what to write instead. If that stops being true nothing
+# else fails, so it is checked against the real binary.
+if waypuppet select 'textbox' >"$out/badrole.txt" 2>&1; then
+    echo "smoke: 'textbox' is not an AT-SPI role and should have been refused" >&2
+    exit 1
+fi
+if ! grep -q 'did you mean' "$out/badrole.txt"; then
+    echo "smoke: an unknown role was refused without naming a real one" >&2
+    cat "$out/badrole.txt" >&2
+    exit 1
+fi
+
+if waypuppet click --on 'button.primary' >"$out/badsyntax.txt" 2>&1; then
+    echo "smoke: a CSS class selector should have been refused" >&2
+    exit 1
+fi
+if ! grep -q 'name=' "$out/badsyntax.txt"; then
+    echo "smoke: a CSS class selector was refused without saying what to write" >&2
+    cat "$out/badsyntax.txt" >&2
+    exit 1
+fi
+echo "smoke: bad selectors are refused by name, with the fix"
+
+# Driving a real toolkit by selector. The capture has to change: a `click --on`
+# that resolved correctly and then delivered nothing would return successfully
+# and do nothing at all.
+waypuppet shot -o "$out/before-selector.png" >/dev/null
+waypuppet click --on "$selector"
+waypuppet shot -o "$out/after-selector.png" >/dev/null
+if cmp -s "$out/before-selector.png" "$out/after-selector.png"; then
+    echo "smoke: clicking $selector changed nothing on screen" >&2
+    echo "--- session log ---" >&2
+    cat "$out/session.log" >&2
+    exit 1
+fi
+echo "smoke: click --on drove the application"
+
+# `--focus-on` against a tree read *now*, because the click above may well have
+# changed the layout — which is the whole reason resolution happens server side,
+# one call at a time, instead of in the caller.
+waypuppet tree > "$out/tree2.txt"
+widget2=$(pick_button "$out/tree2.txt")
+if [ -n "$widget2" ]; then
+    name2=$(printf '%s' "$widget2" | cut -d'|' -f1)
+    waypuppet type 'hi' --focus-on "button[name=\"$name2\"]"
+    echo "smoke: type --focus-on resolved, focused and settled"
+fi
 
 # A paste is a different code path from typing in most toolkits, so it is worth its own
 # check rather than being assumed to follow from `type` working.

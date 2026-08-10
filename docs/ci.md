@@ -5,9 +5,8 @@ How to run your GUI application's tests on a machine with no screen, no desktop 
 
 > **Status:** real. Every verb here works today and is exercised against a real GTK
 > application on every push by [`ci/toolkit-smoke.sh`](../ci/toolkit-smoke.sh), which runs
-> the examples below almost verbatim. The one thing still missing is selectors, so `tree`
-> prints the widget tree but `click` still takes coordinates —
-> [plan 07](../plans/07-accessibility-tree.md).
+> the examples below almost verbatim — including driving that application by selector
+> rather than by coordinate.
 
 ## What CI has to provide
 

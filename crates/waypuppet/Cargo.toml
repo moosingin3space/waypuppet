@@ -11,6 +11,7 @@ workspace = true
 [dependencies]
 waypuppet-compositor.workspace = true
 waypuppet-proto.workspace = true
+waypuppet-select.workspace = true
 
 clap.workspace = true
 tarpc.workspace = true

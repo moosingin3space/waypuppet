@@ -124,6 +124,12 @@ pub enum Command {
     Key {
         /// Chords in caller order.
         chords: Vec<String>,
+        /// Where to click first, to move the toolkit's own focus.
+        ///
+        /// A resolved point, never a query: selectors are the control thread's
+        /// business, and the compositor has never heard of the accessibility
+        /// tree — the same split that keeps `tree` off this channel entirely.
+        focus: Option<Point>,
         /// Reply after the client settles.
         reply: oneshot::Sender<Result<(), Failure>>,
     },
@@ -131,6 +137,8 @@ pub enum Command {
     Write {
         /// Text to type.
         text: String,
+        /// Where to click first, to move the toolkit's own focus.
+        focus: Option<Point>,
         /// Reply after the client settles.
         reply: oneshot::Sender<Result<(), Failure>>,
     },
@@ -541,6 +549,7 @@ mod tests {
         let failure = commands
             .settle(DEADLINE, |reply| Command::Write {
                 text: "hello".to_owned(),
+                focus: None,
                 reply,
             })
             .await
@@ -564,6 +573,7 @@ mod tests {
         let failure = commands
             .settle(DEADLINE, |reply| Command::Write {
                 text: "hello".to_owned(),
+                focus: None,
                 reply,
             })
             .await

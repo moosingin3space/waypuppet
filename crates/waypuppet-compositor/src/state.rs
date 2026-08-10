@@ -728,19 +728,40 @@ impl State {
     /// Returns [`Failure::NoSuchWindow`] if nothing is focused, or
     /// [`Failure::UnmappableChord`] if a chord does not parse. Every chord is
     /// resolved before any is sent, so a typo in the third one does not leave
-    /// the first two already delivered.
-    pub fn deliver_key(&mut self, chords: &[String]) -> Result<WlSurface, Failure> {
+    /// the first two already delivered — and, since `focus` clicks, before the
+    /// click too: a rejected chord must not move the application's focus on its
+    /// way out.
+    pub fn deliver_key(
+        &mut self,
+        chords: &[String],
+        focus: Option<Point>,
+    ) -> Result<WlSurface, Failure> {
         // Parsed before the window is looked up, so a typo is reported as a
         // typo rather than as whatever else happens to be wrong.
         let strokes = chords
             .iter()
             .map(|chord| self.keymap.chord(chord))
             .collect::<Result<Vec<_>, _>>()?;
-        let surface = self.focused()?;
+        let surface = self.focus_first(focus)?;
         for stroke in &strokes {
             self.send_stroke(stroke);
         }
         Ok(surface)
+    }
+
+    /// Give the toolkit's own focus to a point, and report the surface whose
+    /// next frame settles the call.
+    ///
+    /// Focus *within* a window is the toolkit's state, not the seat's: the seat
+    /// owns which surface has keyboard focus, and nothing in Wayland says which
+    /// widget inside it does. A left click is the lever every toolkit honours,
+    /// so that is what this is. It is also harmless where a toolkit focuses on
+    /// pointer-enter instead — a click that changes nothing costs a frame.
+    fn focus_first(&mut self, focus: Option<Point>) -> Result<WlSurface, Failure> {
+        match focus {
+            Some(at) => self.deliver_click(Some(at), Button::Left, Target::Focused),
+            None => self.focused(),
+        }
     }
 
     /// Type `text` as individual key events.
@@ -751,12 +772,12 @@ impl State {
     /// [`Failure::UnmappableChord`] naming the first character
     /// [`crate::input::LAYOUT`] cannot produce. Nothing is typed in that case:
     /// half a string is a worse answer than none.
-    pub fn deliver_text(&mut self, text: &str) -> Result<WlSurface, Failure> {
+    pub fn deliver_text(&mut self, text: &str, focus: Option<Point>) -> Result<WlSurface, Failure> {
         let strokes = text
             .chars()
             .map(|ch| self.keymap.character(ch))
             .collect::<Result<Vec<_>, _>>()?;
-        let surface = self.focused()?;
+        let surface = self.focus_first(focus)?;
         for stroke in &strokes {
             self.send_stroke(stroke);
         }

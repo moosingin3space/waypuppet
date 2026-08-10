@@ -528,16 +528,15 @@ is the AT-SPI registry on it, so an application registers against waypuppet rath
 against the developer's desktop. 261 nodes out of `gtk3-widget-factory`, with roles, names
 and bounds in the coordinates `click --at` takes.
 
-Selectors are built but not yet wired. `waypuppet-select` parses a CSS subset —
-`dialog > button[name*="Save" i]:not([name="Cancel"])` — resolves it against the tree, and
-refuses everything CSS has that this does not by name, with the equivalent spelled out. It
-is covered by `arbtest` properties: printing round-trips, a one-character typo in a role
-still names the role it meant, parsing is total, and a node is always selected by its own
-position. What is left is `click --on`, `key`/`type --focus-on` and `--index` — the CLI and
-trait wiring, described in [plan 07](plans/07-accessibility-tree.md).
+Selectors work end to end. `click --on 'button[name="Save"]'`, `key`/`type --focus-on`,
+`--index N`, and `select` as the dry run. The grammar is a CSS subset in
+`waypuppet-select` — `dialog > button[name*="Save" i]:not([name="Cancel"])` — resolved on
+the control thread before anything crosses the bridge, so it stays one call with one
+settle. `ci/toolkit-smoke.sh` drives `gtk3-widget-factory` by selector and checks the
+resolved point against the bounds the application itself published.
 
-Not yet: [plan 08](plans/08-sandbox-autonomy.md), which is what would let any of this be
-pointed at [example-app](../example-app) rather than at GTK.
+Not yet: `tree --selectors`, and [plan 08](plans/08-sandbox-autonomy.md), which is what
+would let any of this be pointed at [example-app](../example-app) rather than at GTK.
 
 **The roadmap lives in [`plans/`](plans/)** — one file per phase, in the order they should
 land, each with its own acceptance criteria and, once landed, what it taught us.

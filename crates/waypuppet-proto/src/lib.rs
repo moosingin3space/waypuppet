@@ -593,16 +593,31 @@ pub trait Waypuppet {
     async fn shot(target: Target, output: Option<PathBuf>) -> Result<Capture, Failure>;
 
     /// Deliver key chords, each one like `ctrl+shift+t` or `Return`.
-    async fn key(chords: Vec<String>) -> Result<(), Failure>;
+    ///
+    /// `focus` names a widget to focus first. Keyboard focus *within* a window
+    /// is the toolkit's own state, set by input rather than by the seat — the
+    /// seat owns which surface has focus, not which widget inside it — so the
+    /// lever is a click, and it happens on the compositor thread as one settled
+    /// sequence with the chords. Splitting it into a click that settles and a
+    /// separate `key` would reopen the window between reading and acting that
+    /// selectors exist to close.
+    async fn key(chords: Vec<String>, focus: Option<Locator>) -> Result<(), Failure>;
 
-    /// Deliver a string as individual key events.
-    async fn write(text: String) -> Result<(), Failure>;
+    /// Deliver a string as individual key events, optionally focusing first.
+    async fn write(text: String, focus: Option<Locator>) -> Result<(), Failure>;
 
     /// Move the pointer.
     async fn pointer(to: Point, target: Target) -> Result<(), Failure>;
 
-    /// Press and release a pointer button, moving there first when `at` is set.
-    async fn click(at: Option<Point>, button: Button, target: Target) -> Result<(), Failure>;
+    /// Press and release a pointer button, moving there first when `locator` is
+    /// set.
+    ///
+    /// A [`Locator`] rather than a point, so `--at X,Y` and
+    /// `--on 'button[name="Save"]'` are one verb. The query is resolved against
+    /// the published tree on the control thread, before anything crosses to the
+    /// compositor — one call, one settle, and no gap for the layout to move in.
+    async fn click(locator: Option<Locator>, button: Button, target: Target)
+    -> Result<(), Failure>;
 
     /// Scroll by a discrete number of wheel clicks.
     async fn scroll(dx: i32, dy: i32) -> Result<(), Failure>;

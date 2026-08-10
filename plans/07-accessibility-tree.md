@@ -1,6 +1,6 @@
 # 07 — Accessibility tree
 
-**Status:** done, except selectors — decided, not yet built. See "Still to do"
+**Status:** done, selectors included
 **Depends on:** [06](06-clipboard-and-resize.md), which has landed
 
 ## Goal
@@ -251,17 +251,38 @@ are what keep the two from drifting into separate dialects. `deny_unknown_fields
 query types for the same reason: a caller writing `{"text":"Save"}` is told, rather than
 having the field dropped and the query quietly widened to every node in the tree.
 
-## Still to do
+## What the wiring turned out to be
 
-**Wiring.** The crate is finished and tested; nothing calls it yet. What remains is
-`click --on`, `key`/`type --focus-on`, `--index`, the `Locator` in the `Waypuppet` trait,
-the resolved focus point across the bridge, and `Accessibility::locate`. The design for
-each is below and unchanged.
+`click --on`, `key`/`type --focus-on`, `--index`, and `select`. Against
+`gtk3-widget-factory`: `button[name="Minimize"]` resolves to `1523,46`, which is exactly the
+centre of the bounds the application itself published.
 
-**Two verbs that are worth more than the grammar**, both of which the printer already
-makes cheap: `waypuppet tree --selectors`, printing a minimal unique selector beside each
-node so a caller copies rather than composes; and `waypuppet select '<query>'`, a dry run
-showing what matched and where, so a selector can be iterated with no side effects.
+**`select` earns its place by making the smoke test assertable.** `click --on` is one call
+on purpose — resolve and click, with no gap for the layout to move — which leaves no way to
+see *where* it decided to click, and clicking almost anywhere in a widget factory does
+something. So the check is: read a widget's bounds out of `tree`, ask `select` for the same
+widget, and assert the point matches the centre. Verified by breaking it — a resolver
+returning a third of the width instead of half fails with both numbers printed. A test that
+only asserted "the click worked" would have passed.
+
+**The focus click is confirmed, not assumed.** The plan left open whether a left click is
+the right lever for moving a toolkit's internal focus. It is, and `tests/input.rs` watches
+the fixture receive motion, button and keys in that order — because a click delivered
+*after* the keys produces every event a weaker test would look for while focusing the widget
+just in time to miss the text. Verified by reordering the two and watching it fail. The
+all-or-nothing rule extends to it: chords are parsed before the focus click, so a rejected
+chord does not move the application's focus on its way out.
+
+**`Ambiguous` is rendered by the CLI, not by `Display`.** The failure carries every match
+with its ancestor chain precisely so a caller can see what matched and pick, and
+`Failure`'s own `Display` can only produce a count. So the CLI prints each match as a
+selector that would select it alone. Against the real tree that is 21 buttons, each with a
+pasteable selector and its bounds — which is the constructive diagnostic finally reaching
+somebody.
+
+**Still to do:** `waypuppet tree --selectors`, printing a minimal unique selector beside
+each node so a caller copies rather than composes. The printer makes it cheap; it just is
+not written.
 
 **Deferred, and named in the error rather than silently missing.** `#id` maps to AT-SPI's
 accessible id and `:checked`/`:disabled`/`:focus` map almost one-to-one onto AT-SPI states

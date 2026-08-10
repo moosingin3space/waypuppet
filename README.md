@@ -84,9 +84,34 @@ widget you can click. It needs no D-Bus on your machine: waypuppet runs the sess
 and is the accessibility registry on it, so the application registers with waypuppet rather
 than announcing itself to your desktop.
 
-The remaining step is selectors — turning `click --at 1224,780`, a magic number that breaks
-the moment the layout changes, into something that says what it means. That is not built
-yet.
+And you do not have to read the coordinates off it yourself. A selector names the widget:
+
+```
+$ waypuppet click --on 'button[name="Close"]'
+$ waypuppet type 'hello' --focus-on 'entry[name*="Search"]'
+```
+
+The syntax is CSS, cut down to what an accessibility tree can answer — `>` for a direct
+child, a space for any descendant, `*=` for part of a name, `:not(…)` to exclude. Role names
+hyphenate, because a space already means "descendant of": `list-item`, not `list item`.
+
+Resolution happens inside the session, so `click --on` is a single call: there is no gap
+between finding the widget and clicking it for the layout to move in. `waypuppet select`
+is the dry run when you want to see where a selector points before committing to it.
+
+Anything CSS has that waypuppet does not is refused *by name*, with what to write instead —
+`#id`, `.class`, `:nth-child(2)`, `+`, `,`, XPath — and a role that is not a real AT-SPI
+role is a parse error rather than a query that quietly matches nothing:
+
+```
+$ waypuppet click --on 'button.primary'
+waypuppet: `.primary` is a CSS class, and an accessibility tree has no classes
+
+  button.primary
+        ^^^^^^^^
+
+  help: match the accessible name instead: `[name="…"]`, or `[name*="…"]` for part of it
+```
 
 ## Where it runs
 
@@ -165,8 +190,14 @@ registry on it, so the application registers with waypuppet rather than announci
 to your desktop, and none of it needs a bus on the host. It reads 261 nodes out of
 `gtk3-widget-factory`.
 
-**Not yet.** Selectors — `click --on 'button[name="Save"]'` — so a test can name a widget
-instead of a coordinate. The tree is there; the shorthand for pointing at it is not.
+Selectors turn that tree into something to aim with: `click --on 'button[name="Save"]'`,
+`type --focus-on`, and `select` to try one first. The grammar is a subset of CSS, and what
+it does not support it refuses by name with the equivalent spelled out, rather than
+matching nothing quietly.
+
+**Not yet.** Running your application without knowing waypuppet lives in a container —
+[plan 08](plans/08-sandbox-autonomy.md) — which is also what gates pointing any of this at
+[example-app] rather than at GTK.
 
 [CLAUDE.md] has the architecture, [plans/](plans/) has one file per phase with its status
 and what it taught us, and [docs/](docs/) covers using waypuppet in CI.

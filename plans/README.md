@@ -18,7 +18,7 @@ instead.
 | 04 | [Input](04-input.md) — `key`, `type`, `click`, `move`, `scroll` | **done** |
 | 05 | [Wait](05-wait.md) — block on protocol facts, not on sleeps | **done** |
 | 06 | [Clipboard and resize](06-clipboard-and-resize.md) — what a terminal exercises | **done** |
-| 07 | [Accessibility tree](07-accessibility-tree.md) — semantic selectors | **done**, bar selectors |
+| 07 | [Accessibility tree](07-accessibility-tree.md) — semantic selectors | **done** |
 | 08 | [Sandbox autonomy](08-sandbox-autonomy.md) — the caller never types `flatpak run` | not started |
 
 Phases 01–03 were the spine, and they have landed: a session can be started, hosted,
@@ -37,12 +37,16 @@ smoke test that drives a real GTK application.
 06 has landed too: both selections move in both directions, over pipes driven by the event
 loop rather than read inline, and a window can now be smaller than the output.
 
-07 has landed too. waypuppet runs a private D-Bus session and *is* the accessibility
-registry on it, so `waypuppet tree` reads 261 nodes out of `gtk3-widget-factory` with roles,
-names and bounds. The bus is a `dbus-daemon` where the image has one and an embedded `busd`
-where it does not, which covers both CI and the Flatpak SDK. What is left of it is
-selectors — `click --on 'button[name="Save"]'` — which that plan deliberately deferred until
-the tree was real enough to shape them around.
+07 has landed too, selectors included. waypuppet runs a private D-Bus session and *is* the
+accessibility registry on it, so `waypuppet tree` reads 261 nodes out of
+`gtk3-widget-factory` with roles, names and bounds; the bus is a `dbus-daemon` where the
+image has one and an embedded `busd` where it does not, which covers both CI and the
+Flatpak SDK. Selectors were deliberately deferred until that tree was real enough to shape
+them around, and shaping them around it changed the answer: AT-SPI role names contain
+spaces, which collides with CSS's descendant combinator, so roles hyphenate. The grammar is
+a CSS subset in `waypuppet-select`, and the catalogue of things CSS has that it does not —
+each refused by name with the equivalent — turned out to be the product rather than the
+trimming.
 
 08 is numbered last but not ranked last: it only needs 03, and it is what decides whether
 waypuppet is pleasant to reach for or a thing you have to remember how to set up. It is now

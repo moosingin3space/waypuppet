@@ -7,11 +7,15 @@
 //! # Status
 //!
 //! Every verb works: `doctor`, `serve`, `run`, `ps`, `shot`, `logs`, `kill`,
-//! `sessions`, `wait`, `clipboard`, `tree`, and the input verbs `key`, `type`,
-//! `click`, `move`, `scroll` and `resize`.
+//! `sessions`, `wait`, `clipboard`, `tree`, `select`, and the input verbs
+//! `key`, `type`, `click`, `move`, `scroll` and `resize`.
 //!
-//! What is left is selectors — naming a widget from the accessibility tree
-//! instead of a coordinate — which is the rest of `plans/07`.
+//! Selectors name a widget instead of a coordinate: `click --on`,
+//! `key`/`type --focus-on`, and `select` to try one without touching the
+//! application. The grammar is CSS and lives in `waypuppet-select`; what this
+//! crate adds is the two ways to write one — text, and the JSON form of the
+//! query — and the rendering of what comes back, which for an ambiguous match
+//! means printing selectors a caller can paste rather than a count.
 
 mod client;
 
@@ -20,7 +24,8 @@ use std::{path::Path, path::PathBuf, process::ExitCode, time::Duration};
 use clap::{Parser, Subcommand};
 use waypuppet_compositor::{Rendering, session};
 use waypuppet_proto::{
-    Button, ClientState, Cursor, Point, Selection, Settled, Size, Target, WindowId,
+    Button, ClientState, Cursor, Failure, Locator, Point, Query, Selection, Settled, Size, Target,
+    WindowId,
 };
 
 /// What `wait` exits with when its condition did not hold in time.
@@ -148,22 +153,67 @@ enum Command {
         /// Chords to send, in order.
         #[arg(required = true)]
         chords: Vec<String>,
+        /// Focus this widget first, by clicking it. See `select --help`.
+        #[arg(long, value_name = "SELECTOR")]
+        focus_on: Option<String>,
+        /// Which match of `--focus-on` to take, zero-based, in tree order.
+        #[arg(long, requires = "focus_on", value_name = "N")]
+        index: Option<usize>,
     },
 
     /// Type a string as individual key events.
     Type {
         /// The text to type.
         text: String,
+        /// Focus this widget first, by clicking it. See `select --help`.
+        #[arg(long, value_name = "SELECTOR")]
+        focus_on: Option<String>,
+        /// Which match of `--focus-on` to take, zero-based, in tree order.
+        #[arg(long, requires = "focus_on", value_name = "N")]
+        index: Option<usize>,
     },
 
     /// Click a pointer button, optionally moving there first.
     Click {
         /// Where to click, as `X,Y`. The pointer stays put if omitted.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "on")]
         at: Option<String>,
+        /// Which widget to click, as a selector. See `select --help`.
+        #[arg(long, value_name = "SELECTOR")]
+        on: Option<String>,
+        /// Which match of `--on` to take, zero-based, in tree order.
+        #[arg(long, requires = "on", value_name = "N")]
+        index: Option<usize>,
         /// Which button.
         #[arg(long, default_value = "left")]
         button: String,
+    },
+
+    /// Resolve a selector against the accessibility tree, changing nothing.
+    ///
+    /// The dry run for `click --on`: it prints where the click would land and
+    /// what it matched, so a selector can be tried and narrowed without
+    /// touching the application.
+    ///
+    /// A selector is CSS, restricted to what an accessibility tree can answer:
+    ///
+    ///   button[name="Save"]        a button with exactly that name, anywhere
+    ///   [name*="Save"]             any widget whose name contains it
+    ///   dialog > button            a direct child; a space means any descendant
+    ///   list-item[name^="Ch 3"]    role names hyphenate — a space is a step
+    ///   page-tab:not([name="New"]) exclusion
+    ///
+    /// Operators are `=`, `*=`, `^=`, `$=`, and a trailing `i` folds case.
+    /// Anything CSS has that is missing here is refused by name, with what to
+    /// write instead. A selector may also be given as the JSON form of the
+    /// query, which is what an agent emitting the structure would send.
+    #[command(verbatim_doc_comment)]
+    Select {
+        /// The selector.
+        selector: String,
+        /// Which match to take, zero-based, in tree order.
+        #[arg(long, value_name = "N")]
+        index: Option<usize>,
     },
 
     /// Move the pointer.
@@ -389,9 +439,23 @@ async fn dispatch(cli: Cli) -> ExitCode {
         Command::Logs { follow } => logs(&socket, follow).await,
         Command::Sessions => sessions().await,
         Command::Kill => kill(&socket).await,
-        Command::Key { chords } => key(&socket, chords).await,
-        Command::Type { text } => write(&socket, text).await,
-        Command::Click { at, button } => click(&socket, at.as_deref(), &button).await,
+        Command::Key {
+            chords,
+            focus_on,
+            index,
+        } => key(&socket, chords, focus_on.as_deref(), index).await,
+        Command::Type {
+            text,
+            focus_on,
+            index,
+        } => write(&socket, text, focus_on.as_deref(), index).await,
+        Command::Click {
+            at,
+            on,
+            index,
+            button,
+        } => click(&socket, at.as_deref(), on.as_deref(), index, &button).await,
+        Command::Select { selector, index } => select(&socket, &selector, index, cli.json).await,
         Command::Move { x, y } => pointer(&socket, x, y).await,
         Command::Scroll { dx, dy } => scroll(&socket, dx, dy).await,
         Command::Resize { size, window } => resize(&socket, &size, window).await,
@@ -608,35 +672,55 @@ async fn logs(socket: &Path, follow: bool) -> Result<ExitCode, String> {
 // Success is silent: there is nothing to report but "it happened", and a
 // zero exit code already says that.
 
-/// Send key chords.
-async fn key(socket: &Path, chords: Vec<String>) -> Result<ExitCode, String> {
+/// Send key chords, focusing a widget first when asked.
+async fn key(
+    socket: &Path,
+    chords: Vec<String>,
+    focus_on: Option<&str>,
+    index: Option<usize>,
+) -> Result<ExitCode, String> {
+    let focus = selector_locator(focus_on, index)?;
     let session = client::connect(socket).await?;
     session
-        .key(client::deadline(client::DEADLINE), chords)
+        .key(client::deadline(client::DEADLINE), chords, focus)
         .await
         .map_err(|error| error.to_string())?
-        .map_err(|failure| failure.to_string())?;
+        .map_err(|failure| explain(&failure))?;
     Ok(ExitCode::SUCCESS)
 }
 
-/// Type a string.
-async fn write(socket: &Path, text: String) -> Result<ExitCode, String> {
+/// Type a string, focusing a widget first when asked.
+async fn write(
+    socket: &Path,
+    text: String,
+    focus_on: Option<&str>,
+    index: Option<usize>,
+) -> Result<ExitCode, String> {
+    let focus = selector_locator(focus_on, index)?;
     let session = client::connect(socket).await?;
     session
-        .write(client::deadline(client::DEADLINE), text)
+        .write(client::deadline(client::DEADLINE), text, focus)
         .await
         .map_err(|error| error.to_string())?
-        .map_err(|failure| failure.to_string())?;
+        .map_err(|failure| explain(&failure))?;
     Ok(ExitCode::SUCCESS)
 }
 
 /// Click a pointer button.
-async fn click(socket: &Path, at: Option<&str>, button: &str) -> Result<ExitCode, String> {
-    let at = match at {
-        Some(text) => {
-            Some(parse_point(text).ok_or_else(|| format!("--at wants X,Y, got {text:?}"))?)
-        }
-        None => None,
+async fn click(
+    socket: &Path,
+    at: Option<&str>,
+    on: Option<&str>,
+    index: Option<usize>,
+    button: &str,
+) -> Result<ExitCode, String> {
+    // `--at` and `--on` are mutually exclusive at the parser, so at most one of
+    // these produces anything.
+    let locator = match at {
+        Some(text) => Some(Locator::At(
+            parse_point(text).ok_or_else(|| format!("--at wants X,Y, got {text:?}"))?,
+        )),
+        None => selector_locator(on, index)?,
     };
     let button = parse_button(button)
         .ok_or_else(|| format!("--button wants left, right or middle, got {button:?}"))?;
@@ -645,13 +729,54 @@ async fn click(socket: &Path, at: Option<&str>, button: &str) -> Result<ExitCode
     session
         .click(
             client::deadline(client::DEADLINE),
-            at,
+            locator,
             button,
             Target::Focused,
         )
         .await
         .map_err(|error| error.to_string())?
+        .map_err(|failure| explain(&failure))?;
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Resolve a selector and print where a click would land, changing nothing.
+///
+/// The dry run. `click --on` is one call precisely so nothing can move between
+/// resolving and clicking, which leaves no way to see what a selector picked —
+/// so this exists to be that way, and it is the verb to iterate a selector
+/// with.
+async fn select(
+    socket: &Path,
+    selector: &str,
+    index: Option<usize>,
+    json: bool,
+) -> Result<ExitCode, String> {
+    let query = parse_selector(selector, index)?;
+    let session = client::connect(socket).await?;
+    let tree = session
+        .tree(client::deadline(client::DEADLINE), Target::Focused)
+        .await
+        .map_err(|error| error.to_string())?
         .map_err(|failure| failure.to_string())?;
+
+    // Resolved here rather than server side, unlike every other selector path.
+    // Nothing is being driven, so there is no race to close, and doing it
+    // locally means the verb works against any tree — including one saved from
+    // an earlier run, when that becomes worth having.
+    let query = waypuppet_select::validate(&query).map_err(|failure| explain(&failure))?;
+    let point = waypuppet_select::resolve(&tree, &query).map_err(|failure| explain(&failure))?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "selector": waypuppet_select::print(&query),
+                "point": { "x": point.x, "y": point.y },
+            })
+        );
+    } else {
+        println!("{},{}", point.x, point.y);
+    }
     Ok(ExitCode::SUCCESS)
 }
 
@@ -959,6 +1084,83 @@ fn parse_size(text: &str) -> Option<Size> {
         width: width.trim().parse().ok()?,
         height: height.trim().parse().ok()?,
     })
+}
+
+/// Parse a selector into the [`Locator`] a verb carries, if one was given.
+///
+/// `index` without a selector is refused by clap (`requires`), so this only has
+/// to handle "no selector at all".
+fn selector_locator(
+    selector: Option<&str>,
+    index: Option<usize>,
+) -> Result<Option<Locator>, String> {
+    selector
+        .map(|selector| parse_selector(selector, index).map(Locator::On))
+        .transpose()
+}
+
+/// Parse a selector, in either of the two forms a caller may write it.
+///
+/// Text is the form for a person at a shell; JSON is the form for something
+/// emitting the structure directly, which is what makes an MCP server a thin
+/// wrapper over [`Query`] rather than a second grammar to keep in step. They are
+/// told apart by the first character, because a selector can never begin with
+/// `{` — and the error says which parser ran, so a JSON typo is never reported
+/// as a syntax error in a language the caller was not writing.
+///
+/// [`Query`]: waypuppet_proto::Query
+fn parse_selector(selector: &str, index: Option<usize>) -> Result<Query, String> {
+    let mut query = if selector.trim_start().starts_with('{') {
+        serde_json::from_str::<Query>(selector).map_err(|error| {
+            format!(
+                "this begins with `{{`, so it was read as a JSON query: {error}\n\n  \
+                 help: the shape is {{\"first\":{{\"role\":{{\"matches\":\
+                 {{\"op\":\"exact\",\"value\":\"button\",\"case\":\"sensitive\"}}}}}}}}, \
+                 or write it as a selector: button[name=\"Save\"]"
+            )
+        })?
+    } else {
+        waypuppet_select::parse(selector).map_err(|error| error.to_string())?
+    };
+    query.index = index;
+    Ok(query)
+}
+
+/// Render a failure for the terminal.
+///
+/// Everything but [`Failure::Ambiguous`] says what it needs to in its own
+/// `Display`. That one does not, and cannot: it carries every match with the
+/// ancestor chain that locates it, and the whole reason for carrying them is so
+/// a caller can *see what matched and pick*. Flattening that to "matched 7
+/// nodes" would throw away the part that turns a rejection into a next step, so
+/// this is where the matches become selectors somebody can paste back.
+fn explain(failure: &Failure) -> String {
+    use std::fmt::Write;
+
+    let Failure::Ambiguous { count, matches } = failure else {
+        return failure.to_string();
+    };
+
+    // No cap. A broad selector against a real tree can honestly match dozens,
+    // and truncating the list hides exactly the match a caller was looking for.
+    let mut out = format!("selector matched {count} nodes; narrow it, or pick one with --index:\n");
+    for (index, matched) in matches.iter().enumerate() {
+        let _ = write!(out, "\n  [{index}] {}", waypuppet_select::narrowed(matched));
+        match matched.bounds {
+            Some(bounds) => {
+                let _ = write!(
+                    out,
+                    "\n       at {},{} {}x{}",
+                    bounds.origin.x, bounds.origin.y, bounds.size.width, bounds.size.height
+                );
+            }
+            // Visible here rather than as a surprise at click time: an index
+            // pointing at this one fails with `MatchedNoBounds`, and saying so
+            // now is cheaper than saying it after.
+            None => out.push_str("\n       not laid out — nowhere to click"),
+        }
+    }
+    out
 }
 
 /// Parse `X,Y`.

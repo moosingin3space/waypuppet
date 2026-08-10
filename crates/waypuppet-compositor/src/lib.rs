@@ -371,8 +371,14 @@ fn handle_command(state: &mut State, command: Command) {
         // until the client draws. Delivery is immediate; only the *reply* is
         // parked, so the loop keeps running — which it must, because the frame
         // being waited for can only arrive through it.
-        Command::Key { chords, reply } => settle(state, reply, |state| state.deliver_key(&chords)),
-        Command::Write { text, reply } => settle(state, reply, |state| state.deliver_text(&text)),
+        Command::Key {
+            chords,
+            focus,
+            reply,
+        } => settle(state, reply, |state| state.deliver_key(&chords, focus)),
+        Command::Write { text, focus, reply } => {
+            settle(state, reply, |state| state.deliver_text(&text, focus));
+        }
         Command::Pointer { to, target, reply } => {
             settle(state, reply, |state| state.deliver_pointer(to, target));
         }
