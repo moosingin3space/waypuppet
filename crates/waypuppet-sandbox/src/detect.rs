@@ -155,6 +155,60 @@ pub fn runtime_commit(runtime: &FlatpakRuntime) -> Option<String> {
     Some(commit)
 }
 
+/// The runtime this process is *already inside*, when that is a flatpak one.
+///
+/// Distinct from [`runtime_commit`], which asks about a runtime a session would
+/// enter. This asks what is underfoot, and it is the case that matters for a
+/// golden-image suite: those run inside the sandbox, so waypuppet is not
+/// entering anything and has no plan to read a runtime out of.
+///
+/// Without this the fingerprint reported `none (host)` from inside a flatpak and
+/// advised `--sandbox flatpak` — advice that cannot be taken, because [`resolve`]
+/// refuses a nested sandbox. A diagnostic naming a fix nobody can follow is worse
+/// than one that says nothing.
+///
+/// `/.flatpak-info` carries both halves, which is what makes this cheap: flatpak
+/// records the runtime ref and the `OSTree` commit it is deployed at, so there is
+/// nothing to ask a subprocess and nothing to guess.
+///
+/// [`resolve`]: crate::resolve
+#[must_use]
+pub fn enclosing_runtime() -> Option<(FlatpakRuntime, String)> {
+    let info = std::fs::read_to_string("/.flatpak-info").ok()?;
+
+    let mut reference = None;
+    let mut commit = None;
+    for line in info.lines() {
+        // Prefix matching rather than a key-value parse: `/.flatpak-info` is a
+        // keyfile with sections, and both keys are unique across all of them.
+        if let Some(value) = line.strip_prefix("runtime=") {
+            reference = Some(value.trim().to_owned());
+        } else if let Some(value) = line.strip_prefix("runtime-commit=") {
+            commit = Some(value.trim().to_owned());
+        }
+    }
+
+    // `runtime/org.freedesktop.Sdk/x86_64/25.08` — a full ref, id second and
+    // branch last. The architecture between them is already a field of the
+    // fingerprint, so it is dropped here rather than recorded twice.
+    let reference = reference?;
+    let mut parts = reference.split('/');
+    let ("runtime", Some(id), Some(_arch), Some(branch)) =
+        (parts.next()?, parts.next(), parts.next(), parts.next())
+    else {
+        tracing::debug!(%reference, "unrecognised runtime ref in /.flatpak-info");
+        return None;
+    };
+
+    Some((
+        FlatpakRuntime {
+            id: id.to_owned(),
+            branch: branch.to_owned(),
+        },
+        commit?,
+    ))
+}
+
 /// Container engines on `PATH`, podman first.
 ///
 /// Podman leads because it needs no daemon and no group membership, so it is the

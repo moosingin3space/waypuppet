@@ -149,6 +149,21 @@ pub enum Unpinned {
     /// one on the caller's behalf — inventing a pin the caller did not ask for
     /// would be claiming a guarantee nobody made.
     Image(String),
+    /// Inside a container waypuppet cannot identify.
+    ///
+    /// A flatpak sandbox is not this case — `/.flatpak-info` names the runtime
+    /// and its commit, so one of those pins itself. This is an OCI container,
+    /// where what pins the capture is the image, and the image is something the
+    /// caller knows and waypuppet does not.
+    ///
+    /// It exists because [`Host`](Self::Host) advises `--sandbox flatpak`, which
+    /// a process already inside a container cannot do — `resolve` refuses a
+    /// nested sandbox. Reporting the two as one thing meant naming a fix that
+    /// could not be taken.
+    Enclosed {
+        /// What waypuppet believes it is running inside.
+        enclosure: String,
+    },
     /// A flatpak runtime whose commit could not be read.
     ///
     /// Distinct from [`Host`](Self::Host) on purpose: this one is pinnable and
@@ -172,6 +187,12 @@ impl Unpinned {
                 "`{reference}` is a tag, which can move. Name an image by digest, or use \
                  `--sandbox flatpak`, whose runtimes are content-addressed."
             ),
+            Self::Enclosed { enclosure } => format!(
+                "this session is already inside {enclosure}, so it cannot enter a runtime \
+                 and there is nothing here to read a commit from. The image this container \
+                 came from is what pins these captures; record it yourself, or build the \
+                 image on a flatpak runtime so the fingerprint can state it."
+            ),
             Self::UnknownCommit { runtime } => format!(
                 "`flatpak info --show-commit {runtime}` did not answer. The runtime is \
                  pinnable; something stopped it being read."
@@ -184,6 +205,7 @@ impl fmt::Display for Unpinned {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Host => f.write_str("none (host)"),
+            Self::Enclosed { enclosure } => write!(f, "none (inside {enclosure})"),
             Self::Image(reference) => write!(f, "none (image {reference})"),
             Self::UnknownCommit { runtime } => write!(f, "none ({runtime}, commit unknown)"),
         }

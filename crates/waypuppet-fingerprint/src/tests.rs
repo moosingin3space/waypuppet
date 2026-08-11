@@ -149,9 +149,15 @@ fn every_rejection_names_the_shape_it_wanted() {
 
 #[test]
 fn every_unpinned_reason_says_what_to_do_about_it() {
+    // `fix` matches exhaustively, so the compiler already guarantees every
+    // variant *has* one. What this adds is that it is not empty and that adding
+    // a variant is a prompt to think about what to tell somebody who hits it.
     for reason in [
         Unpinned::Host,
         Unpinned::Image("ubuntu:24.04".to_owned()),
+        Unpinned::Enclosed {
+            enclosure: "podman container".to_owned(),
+        },
         Unpinned::UnknownCommit {
             runtime: "org.freedesktop.Platform//25.08".to_owned(),
         },
@@ -162,6 +168,22 @@ fn every_unpinned_reason_says_what_to_do_about_it() {
 
 /// Generated over the real vocabulary, so the property cannot pass vacuously:
 /// anything this crate can write, it can read back unchanged.
+/// The bug this variant was added for: a session already inside a container
+/// cannot enter a runtime, so advising `--sandbox flatpak` names a fix that
+/// `resolve` would refuse. Only [`Unpinned::Host`] may say that.
+#[test]
+fn only_a_host_session_is_told_to_enter_a_runtime() {
+    let enclosed = Unpinned::Enclosed {
+        enclosure: "podman container".to_owned(),
+    };
+    assert!(
+        !enclosed.fix().contains("--sandbox flatpak"),
+        "{}",
+        enclosed.fix()
+    );
+    assert!(Unpinned::Host.fix().contains("--sandbox flatpak"));
+}
+
 #[test]
 fn recording_and_reading_back_is_a_round_trip() {
     arbtest(|u| {

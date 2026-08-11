@@ -473,6 +473,15 @@ Four decisions in it are load-bearing:
   `flatpak_wins_over_an_engine_even_when_an_image_is_named` pins that ordering, because
   reordering those two arms would break every consumer holding goldens and would break
   it quietly.
+
+  The runtime a session is *already inside* counts too, and that is not the same
+  question as the one `resolve` answers. A golden suite runs inside the sandbox, so
+  waypuppet is not entering anything and has no plan to read a runtime out of —
+  `/.flatpak-info` is, and it carries both the ref and the commit. Before that was read,
+  the fingerprint reported `none (host)` from inside a flatpak and advised
+  `--sandbox flatpak`, which `resolve` refuses as nested: a diagnostic naming a fix
+  nobody can take. `Unpinned::Enclosed` exists so a container waypuppet cannot identify
+  is told something true instead.
 - **Unpinned gets a different digest prefix**, `wp1u:` rather than `wp1:`, so a pinned
   expectation cannot accidentally match an unpinned observation. Structure rather than a
   rule somebody has to follow — the same move as splitting `wait` conditions so neither

@@ -679,6 +679,7 @@ impl FingerprintOutput {
 /// session that would never have started is worse than none.
 fn fingerprint_of(
     plan: Result<&waypuppet_sandbox::Plan, &String>,
+    enclosure: waypuppet_sandbox::Enclosure,
     software: bool,
     renders: bool,
 ) -> waypuppet_fingerprint::Fingerprint {
@@ -704,9 +705,26 @@ fn fingerprint_of(
                 Pin::Nothing(Unpinned::Image(reference.clone()))
             }
         },
-        // Running here, or unable to run anywhere. Either way there is no
-        // runtime behind the pixels, and saying so is the point.
-        Ok(waypuppet_sandbox::Plan::Direct(_)) | Err(_) => Pin::Nothing(Unpinned::Host),
+        // Running here, or unable to run anywhere — so there is no plan to read
+        // a runtime out of. That is not the same as there being no runtime: a
+        // session inside a flatpak sandbox is not entering one, and the one it
+        // is already in names itself and its commit in `/.flatpak-info`. This is
+        // the ordinary case for a golden-image suite, which runs *inside* the
+        // sandbox rather than asking waypuppet to build one.
+        Ok(waypuppet_sandbox::Plan::Direct(_)) | Err(_) => waypuppet_sandbox::enclosing_runtime()
+            .map_or_else(
+                || match enclosure {
+                    waypuppet_sandbox::Enclosure::Host => Pin::Nothing(Unpinned::Host),
+                    other => Pin::Nothing(Unpinned::Enclosed {
+                        enclosure: other.to_string(),
+                    }),
+                },
+                |(runtime, commit)| Pin::Runtime {
+                    id: runtime.id,
+                    branch: runtime.branch,
+                    commit,
+                },
+            ),
     };
 
     waypuppet_fingerprint::Fingerprint {
@@ -753,7 +771,7 @@ fn fingerprint(args: &FingerprintArgs, socket: &Path, json: bool) -> Result<Exit
     let captures = waypuppet_sandbox::settle(&default_capture_dir(socket));
     let plan = sandbox::plan(&options, &[], socket, &captures, &facts);
 
-    let observed = fingerprint_of(plan.as_ref(), args.software, renders);
+    let observed = fingerprint_of(plan.as_ref(), facts.enclosure, args.software, renders);
 
     if let Some(expect) = &args.expect {
         let expectation = waypuppet_fingerprint::Expectation::parse(expect)?;
@@ -1590,7 +1608,7 @@ fn doctor(args: &SandboxArgs, socket: &Path, json: bool) -> Result<ExitCode, Str
             // `false`: this reports what the machine would do left alone.
             // `waypuppet fingerprint --software` is how to ask what the
             // captures a golden suite takes would be pinned to instead.
-            &fingerprint_of(plan.as_ref(), false, renders),
+            &fingerprint_of(plan.as_ref(), facts.enclosure, false, renders),
         ));
     }
 

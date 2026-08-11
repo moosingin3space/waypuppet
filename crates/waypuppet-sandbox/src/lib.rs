@@ -57,7 +57,7 @@ use std::{
 };
 
 pub use crate::{
-    detect::{examine, runtime_commit, runtime_installed},
+    detect::{enclosing_runtime, examine, runtime_commit, runtime_installed},
     mounts::tidy,
     paths::{command_path, settle},
     project::{FILE as PROJECT_FILE, Project, ProjectError},
