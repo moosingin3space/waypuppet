@@ -1,0 +1,158 @@
+name: release
+
+# Two jobs and two triggers, and the split matters.
+#
+# `abi` runs on every push and pull request, because the properties it checks are ones a
+# test suite cannot see: a binary that needs a newer glibc, or that has picked up a
+# load-time dependency on mesa, passes every test on the machine that built it and fails on
+# somebody else's. Catching that on the commit that caused it is the entire point — finding
+# it at release time means bisecting through everything since the last tag.
+#
+# `publish` runs only on a version tag, and reuses the same image and the same script. There
+# is no release-only build path, so the artifact that ships is the one that has been checked
+# on every commit leading to it.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+# `ci/release.sh` prefers podman, which is right on a contributor's machine and wrong here:
+# the build step loads the image into *docker*, and podman cannot see it, so it would
+# rebuild the whole thing before every job. The same reasoning as check.yml.
+env:
+  WAYPUPPET_CONTAINER_ENGINE: docker
+  WAYPUPPET_RELEASE_IMAGE: waypuppet-release:local
+
+jobs:
+  abi:
+    name: build and check the ABI baseline
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # A different image from check.yml's, deliberately. That one tracks the Flatpak SDK
+      # so CI predicts what a contributor sees; this one is pinned to Ubuntu 22.04 — glibc
+      # 2.35, the floor waypuppet promises against — and is allowed to lag. Sharing one
+      # image would tie the distribution floor to whatever the test image last updated to.
+      - name: Build the release image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ci/Containerfile.release
+          tags: ${{ env.WAYPUPPET_RELEASE_IMAGE }}
+          load: true
+          cache-from: type=gha,scope=release
+          cache-to: type=gha,mode=max,scope=release
+
+      # Its own cache key. check.yml learned this the hard way: two jobs computing the same
+      # key means one of them permanently fails to reserve it, and they are not building the
+      # same thing anyway.
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ci/.cache-release/registry
+            ci/.cache-release/git
+            ci/.cache-release/target
+          key: cargo-release-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'ci/Containerfile.release') }}
+          restore-keys: cargo-release-${{ runner.os }}-
+
+      # Exactly what `just release` runs locally. The ABI check is inside the script rather
+      # than a step here, so a contributor cannot pass locally and fail here.
+      - name: Build and check
+        run: ci/release.sh
+
+      # Kept for every run, not just tags. When the ABI check fails, the binary it failed on
+      # is what you want to run `objdump` against yourself.
+      - name: Upload the binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: waypuppet-x86_64-linux
+          path: ci/release/waypuppet
+          if-no-files-found: error
+
+  publish:
+    name: publish the release
+    needs: abi
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download the binary
+        uses: actions/download-artifact@v4
+        with:
+          name: waypuppet-x86_64-linux
+          path: dist
+
+      # A tag that disagrees with the manifest produces a release nobody can reconcile
+      # afterwards: `waypuppet --version` says one thing and the release page says another,
+      # and there is no way to tell which was intended. Cheap to check, impossible to fix
+      # once published.
+      - name: The tag matches the crate version
+        run: |
+          tagged=${GITHUB_REF_NAME#v}
+          declared=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          if [ "$tagged" != "$declared" ]; then
+            echo "tag $GITHUB_REF_NAME says $tagged, Cargo.toml says $declared" >&2
+            exit 1
+          fi
+          echo "version $declared"
+
+      # Named for the platform it was built for. waypuppet is x86_64-only today because
+      # that is what has been built and checked; a second architecture means a second
+      # matrix entry here and a second `arch` in the render fingerprint, not a rename.
+      - name: Package
+        run: |
+          cd dist
+          chmod +x waypuppet
+          tar --create --gzip --file "waypuppet-${GITHUB_REF_NAME}-x86_64-linux.tar.gz" waypuppet
+          sha256sum waypuppet-*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      # `--verify-tag` refuses to invent a tag that does not exist, which is the failure
+      # mode of publishing from a typo.
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --verify-tag \
+            --generate-notes \
+            --notes-file - \
+            dist/waypuppet-*.tar.gz \
+            dist/SHA256SUMS <<'NOTES'
+          Built against glibc 2.35 (Ubuntu 22.04), so it runs on anything newer — Debian 12,
+          CentOS Stream 10, current Fedora. `libEGL` is dlopened rather than linked, so the
+          binary starts on a machine with no GPU stack and `waypuppet doctor` will say so
+          rather than failing to load.
+
+          Verified by `ci/abi-baseline.sh` on the commit this was built from.
+
+          ## Installing
+
+              tar xzf waypuppet-*-x86_64-linux.tar.gz
+              install -m755 waypuppet ~/.local/bin/
+
+          Then `waypuppet doctor` to see what this machine can render with, and
+          `waypuppet setup` if it needs a runtime.
+
+          ## Golden images
+
+          `waypuppet fingerprint --record` writes the line to keep beside them, and
+          `--expect` checks it. A release may move the render epoch; when it does, the
+          fingerprint changes and says so, which is the point.
+          NOTES
