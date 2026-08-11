@@ -443,6 +443,70 @@ unsafe `get_mut`, where registering a clone of the poll fd as a wake-only source
 dispatching in the run loop is equivalent and safe. anvil also carries XWayland, multiple
 backends and a dozen protocols waypuppet does not want. Take the shape, check the details.
 
+### A golden image is only as portable as its fingerprint
+
+waypuppet composites the frame, and the runtime supplies mesa and the fonts the
+application draws with, so **all three are inputs to every golden image downstream of
+waypuppet.** Upgrade any of them and a consumer's whole suite fails at once, saying only
+that some pixels moved. `waypuppet fingerprint` is how that becomes a sentence.
+
+The format is one line, and the line is the artifact:
+
+```
+wp-render/1|epoch=1|arch=x86_64|renderer=software|runtime=org.freedesktop.Platform//25.08@96b4841c…
+```
+
+Four decisions in it are load-bearing:
+
+- **The epoch is bumped by hand and is not the crate version.** A version answers "is
+  this the same build", which is a different question and answers it far too often:
+  every patch release would invalidate every golden everywhere, and a suite that gets
+  re-blessed reflexively has stopped being a test. `RENDER_EPOCH` in
+  `waypuppet-compositor` carries the rule — bump it when a capture of an unchanged
+  application could come out different. Nothing enforces that, and it is the honest cost
+  of the design.
+- **The runtime commit is the whole pin, and is why flatpak is preferred.** mesa and the
+  font set both arrive with the runtime, so its `OSTree` commit already moves when
+  either does; nothing else has to be measured. An image tag can move under a caller and
+  say nothing, so a podman-hosted session reports as *unpinned* rather than being
+  treated as equivalent. `resolve` keeps an engine as the last resort, and
+  `flatpak_wins_over_an_engine_even_when_an_image_is_named` pins that ordering, because
+  reordering those two arms would break every consumer holding goldens and would break
+  it quietly.
+- **Unpinned gets a different digest prefix**, `wp1u:` rather than `wp1:`, so a pinned
+  expectation cannot accidentally match an unpinned observation. Structure rather than a
+  rule somebody has to follow — the same move as splitting `wait` conditions so neither
+  half is handed one it cannot see.
+- **Record the canonical form, not the digest.** A digest cannot be reversed, so it can
+  only ever say that something changed. `--expect` takes either and says so when it was
+  given the weaker one.
+
+A mismatch is exit 3, the same code `wait` uses: "the renderer is not the one your
+images were recorded against" is an answer a script may well be checking for, and it
+must not look like waypuppet falling over.
+
+### The distributable binary is built older than anything else here
+
+Running waypuppet needs far less than building it: two non-glibc libraries at load time,
+`libwayland-server` and `libxkbcommon`, and **`libEGL` is dlopened rather than linked**.
+That last one is not an implementation detail — it is why the binary starts at all on a
+machine with no GPU stack, which is what lets `doctor` say "nothing to render with here,
+use a runtime" instead of failing to load with a linker error nobody can act on. The
+whole sandbox-autonomy feature rests on it.
+
+So `ci/Containerfile.release` is Ubuntu 22.04 — glibc 2.35, the floor waypuppet promises
+against, covering Debian 12, CentOS Stream 10 and current Fedora. Note that the two are
+not interchangeable: CentOS Stream 10 is glibc 2.39, and a binary built there will not
+run on 22.04. It is a separate image from `ci/Containerfile` deliberately; that one
+tracks the Flatpak SDK so CI predicts what a contributor sees, and merging them would tie
+the distribution floor to whatever the test image last updated to.
+
+`ci/abi-baseline.sh` asserts both properties, because neither shows up in a test suite —
+the binary that fails them passes everything, on the machine it was built on. Its own
+first version had the version comparison inverted and passed a glibc-2.39 binary against
+a 2.35 floor; it was caught by running it against a binary that had to fail, which is the
+only way to check a defence of this shape.
+
 ### Determinism is a feature
 
 Fixed output size, fixed scale, one client, nothing else on the desktop. Anything that
@@ -463,11 +527,15 @@ just cli ARGS     # run the binary: `just cli shot -o /tmp/o.png`. No `--`.
 just shell        # interactive shell in the SDK, toolchain active
 just ci           # what CI runs, in the image CI runs it in. Needs podman or docker.
 just toolkit      # drive a real GTK app under waypuppet, in that image.
+just release      # build the distributable binary on Ubuntu 22.04, and check its ABI
+just abi BINARY   # check any binary against the distribution ABI baseline
 ```
 
-Every recipe builds inside the Flatpak SDK — see [Toolchain](#toolchain), and note the two
+Every recipe builds inside the Flatpak SDK — see [Toolchain](#toolchain), and note the
 exceptions: `just ci` and `just toolkit` use the *CI image* instead, which is a different
-container with the same libraries. For anything ad-hoc, including a single test, use `just
+container with the same libraries, and `just release` uses a third — Ubuntu 22.04, older
+than either, for the reason in [the distribution
+note](#the-distributable-binary-is-built-older-than-anything-else-here). For anything ad-hoc, including a single test, use `just
 shell` and run cargo in there. Bare `cargo` outside either container is unsupported:
 whether it links depends on what a given machine has installed, which is exactly the
 variable both images exist to remove.
