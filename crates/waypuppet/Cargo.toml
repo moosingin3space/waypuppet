@@ -10,6 +10,7 @@ workspace = true
 
 [dependencies]
 waypuppet-compositor.workspace = true
+waypuppet-fingerprint.workspace = true
 waypuppet-proto.workspace = true
 waypuppet-sandbox.workspace = true
 waypuppet-select.workspace = true

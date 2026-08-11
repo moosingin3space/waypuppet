@@ -191,6 +191,32 @@ fn without_flatpak_an_image_is_used_when_one_was_named() {
     );
 }
 
+/// The demotion, asserted rather than left to the order of arms in a `match`.
+///
+/// Both runtimes are installed and an image is named — every signal a caller can
+/// give short of asking for `--sandbox podman` outright. Flatpak still wins.
+///
+/// It is worth a test of its own because the reason is not local to `resolve`: a
+/// flatpak runtime is deployed at an `OSTree` commit, so a session in one can say
+/// exactly what drew its pixels, and mesa and the fonts both move that commit
+/// when they change. An image tag can move under the caller silently. Anything
+/// that reorders these two breaks `waypuppet fingerprint` for every consumer
+/// holding golden images, and it would break it quietly.
+#[test]
+fn flatpak_wins_over_an_engine_even_when_an_image_is_named() {
+    let facts = needs_a_sandbox();
+    assert!(facts.flatpak.is_some() && !facts.engines.is_empty(), "both");
+
+    let mut request = request(Sandbox::Auto);
+    request.image = Some("example:latest".to_owned());
+
+    let plan = resolve(&request, &facts).expect("flatpak is available");
+    assert_eq!(
+        reentered(&plan).runtime,
+        super::Runtime::Flatpak(FlatpakRuntime::parse("org.freedesktop.Platform//25.08")),
+    );
+}
+
 #[test]
 fn a_machine_with_nothing_at_all_says_so_once() {
     let facts = Facts {

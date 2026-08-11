@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/waypuppet",
     "crates/waypuppet-compositor",
+    "crates/waypuppet-fingerprint",
     "crates/waypuppet-proto",
     "crates/waypuppet-sandbox",
     "crates/waypuppet-select",
@@ -15,6 +16,7 @@ edition = "2024"
 
 [workspace.dependencies]
 waypuppet-compositor = { path = "crates/waypuppet-compositor" }
+waypuppet-fingerprint = { path = "crates/waypuppet-fingerprint" }
 waypuppet-proto = { path = "crates/waypuppet-proto" }
 waypuppet-sandbox = { path = "crates/waypuppet-sandbox" }
 waypuppet-select = { path = "crates/waypuppet-select" }
@@ -51,6 +53,8 @@ zbus = { version = "5", default-features = false, features = ["tokio"] }
 # The fallback bus, for images with no daemon of their own — the Flatpak SDK among them.
 # Alpha, and only reached when there is no alternative; see `a11y::Provider`.
 busd = { version = "0.5", default-features = false }
+# Digesting the render fingerprint. Already in the tree via zbus.
+sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

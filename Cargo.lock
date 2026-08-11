@@ -2123,6 +2123,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "waypuppet-compositor",
+ "waypuppet-fingerprint",
  "waypuppet-proto",
  "waypuppet-sandbox",
  "waypuppet-select",
@@ -2148,10 +2149,19 @@ dependencies = [
  "tracing",
  "wayland-client",
  "wayland-protocols",
+ "waypuppet-fingerprint",
  "waypuppet-proto",
  "waypuppet-sandbox",
  "waypuppet-select",
  "zbus",
+]
+
+[[package]]
+name = "waypuppet-fingerprint"
+version = "0.1.0"
+dependencies = [
+ "arbtest",
+ "sha2",
 ]
 
 [[package]]
@@ -2172,6 +2182,7 @@ dependencies = [
  "thiserror",
  "toml",
  "tracing",
+ "waypuppet-fingerprint",
 ]
 
 [[package]]

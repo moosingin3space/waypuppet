@@ -1,0 +1,15 @@
+[package]
+name = "waypuppet-fingerprint"
+description = "The render fingerprint: what a capture's pixels depend on, stated so two machines can compare it."
+authors.workspace = true
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+sha2.workspace = true
+
+[dev-dependencies]
+arbtest.workspace = true

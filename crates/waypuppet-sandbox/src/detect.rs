@@ -121,6 +121,40 @@ fn flatpak_runtimes() -> Option<Vec<FlatpakRuntime>> {
     )
 }
 
+/// The `OSTree` commit a runtime is deployed at, when it can be read.
+///
+/// This is what makes a flatpak-hosted capture comparable across machines and
+/// across time: mesa and the font set both come out of the runtime, so this one
+/// value already moves when either of them does, and nothing else has to be
+/// measured to notice. It is the reason `--sandbox flatpak` is preferred over a
+/// container for anything holding golden images — an image tag can move under
+/// you and say nothing.
+///
+/// `None` rather than an error, because a fingerprint that cannot be pinned is a
+/// real answer with its own fix. See [`waypuppet_fingerprint::Unpinned`].
+#[must_use]
+pub fn runtime_commit(runtime: &FlatpakRuntime) -> Option<String> {
+    which("flatpak")?;
+
+    let output = Command::new("flatpak")
+        .args(["info", "--show-commit", &runtime.to_string()])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        tracing::debug!(%runtime, "`flatpak info --show-commit` failed; the runtime is unpinned");
+        return None;
+    }
+
+    let commit = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    // An empty answer is a failure that exited zero, and treating it as a commit
+    // would put a fingerprint on the wire that pins nothing while claiming to.
+    if commit.is_empty() {
+        tracing::debug!(%runtime, "`flatpak info --show-commit` said nothing");
+        return None;
+    }
+    Some(commit)
+}
+
 /// Container engines on `PATH`, podman first.
 ///
 /// Podman leads because it needs no daemon and no group membership, so it is the

@@ -126,6 +126,29 @@ impl Default for Config {
     }
 }
 
+/// How this crate's rendering is versioned, for the purpose of comparing pixels.
+///
+/// It lives here, next to the code it describes, because the rule for changing
+/// it is about this crate and nothing else: **bump it when a capture of an
+/// unchanged application could come out different.** That means the offscreen
+/// GLES path in `render`, the readback, the PNG encode, how the output is
+/// constructed, the default scale or format, or which rasteriser a given request
+/// selects.
+///
+/// Leave it alone for anything that cannot reach a pixel — a new verb, a
+/// protocol field, a better error message, a fix to `wait`. The crate version is
+/// what tracks those.
+///
+/// Nothing enforces this, and that is the honest cost of the design: see
+/// [`waypuppet_fingerprint::Epoch`] for why it is preferred to deriving the
+/// number from the version, which would be enforceable and would invalidate
+/// every consumer's golden images on every patch release.
+///
+/// | epoch | what it covers |
+/// |-------|----------------|
+/// | 1     | the first stated epoch. GLES offscreen render, `ExportMem` readback, PNG via the `png` crate. |
+pub const RENDER_EPOCH: waypuppet_fingerprint::Epoch = waypuppet_fingerprint::Epoch(1);
+
 /// A rendering device waypuppet could use.
 #[derive(Debug, Clone)]
 pub struct RenderDevice {

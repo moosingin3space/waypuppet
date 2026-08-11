@@ -18,6 +18,8 @@ waypuppet-proto.workspace = true
 # capture the caller cannot open — see `session::socket_path`.
 waypuppet-sandbox.workspace = true
 waypuppet-select.workspace = true
+# For `RENDER_EPOCH`, which is a fact about the capture path and so belongs beside it.
+waypuppet-fingerprint.workspace = true
 
 calloop.workspace = true
 futures.workspace = true

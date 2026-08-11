@@ -57,7 +57,7 @@ use std::{
 };
 
 pub use crate::{
-    detect::{examine, runtime_installed},
+    detect::{examine, runtime_commit, runtime_installed},
     mounts::tidy,
     paths::{command_path, settle},
     project::{FILE as PROJECT_FILE, Project, ProjectError},
@@ -644,6 +644,16 @@ pub fn resolve(request: &Request, facts: &Facts) -> Result<Plan, Obstacle> {
                 // `waypuppet setup` away, which is a better answer than
                 // silently reaching for a container image the caller has not
                 // heard of.
+                // An engine is the last resort, and stays one. A flatpak runtime
+                // is deployed at an `OSTree` commit, so a session hosted in one
+                // can state exactly what its pixels came from — mesa and the
+                // font set both arrive with it, and both move that commit when
+                // they change. An image reference is a tag, which can move under
+                // a caller and say nothing; `waypuppet fingerprint` reports such
+                // a session as unpinned for that reason rather than pretending
+                // the two are equivalent. Reaching for the weaker one when the
+                // stronger is merely uninstalled would be choosing that quietly
+                // on the caller's behalf.
                 Err(Obstacle::NoFlatpak) => match image(request, facts) {
                     Ok(runtime) => Ok(reenter(request, facts, runtime)),
                     Err(_) => Err(Obstacle::NoSandbox),

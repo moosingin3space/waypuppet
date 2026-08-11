@@ -40,6 +40,16 @@ use waypuppet_proto::{
 /// if both exit the same way.
 const TIMED_OUT: u8 = 3;
 
+/// What `fingerprint --expect` exits with when the fingerprint moved.
+///
+/// The same 3, and deliberately the same constant: "the thing you asked about
+/// is not so" is one answer, whether it is a window that never mapped or a
+/// renderer that is no longer the one your goldens were recorded against. A
+/// second code would make a caller learn two spellings of one idea.
+fn expectation_unmet() -> ExitCode {
+    ExitCode::from(TIMED_OUT)
+}
+
 /// Run a GUI application inside a headless compositor, then look at it and
 /// drive it.
 #[derive(Debug, Parser)]
@@ -125,6 +135,20 @@ enum Command {
         #[arg(required = true, last = true)]
         argv: Vec<String>,
     },
+
+    /// Report the render fingerprint, or check it against one you recorded.
+    ///
+    /// waypuppet composites the frame and the runtime supplies mesa and the
+    /// fonts, so all three are inputs to every golden image downstream. This is
+    /// how a suite of them notices that one of them moved, in a sentence rather
+    /// than as every scene failing at once for no stated reason.
+    ///
+    /// Record the canonical form — `--record` — rather than the digest, and keep
+    /// it beside the images. A digest fits in a CI variable and can only ever
+    /// say that something changed; the canonical form says what.
+    ///
+    /// Exits 3 when `--expect` does not hold, the same as `wait`.
+    Fingerprint(FingerprintArgs),
 
     /// List every window the session is hosting.
     Ps,
@@ -508,6 +532,7 @@ async fn dispatch(cli: Cli) -> ExitCode {
 
     let outcome = match cli.command {
         Command::Doctor { sandbox } => doctor(&sandbox, &socket, cli.json),
+        Command::Fingerprint(args) => fingerprint(&args, &socket, cli.json),
         Command::Setup { runtime } => setup(runtime.as_deref()),
         Command::Serve {
             size,
@@ -611,6 +636,201 @@ async fn dispatch(cli: Cli) -> ExitCode {
 /// list entirely.
 fn default_capture_dir(socket: &Path) -> PathBuf {
     socket.with_extension("captures")
+}
+
+/// Which form `fingerprint` prints when it is not checking one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FingerprintOutput {
+    /// The short label.
+    Digest,
+    /// The canonical form, to be recorded.
+    Record,
+    /// The whole record, for a human.
+    Explain,
+    /// The whole record, for a program.
+    Json,
+}
+
+impl FingerprintOutput {
+    /// Which form the flags asked for.
+    ///
+    /// `--json` wins because it is global: a caller who set it once wants every
+    /// verb machine-readable, and quietly handing them a bare digest instead
+    /// would make one verb the exception. The three are mutually exclusive at
+    /// the clap level, so the order below only settles `--json`.
+    fn chosen(json: bool, record: bool, explain: bool) -> Self {
+        match (json, record, explain) {
+            (true, _, _) => Self::Json,
+            (_, true, _) => Self::Record,
+            (_, _, true) => Self::Explain,
+            _ => Self::Digest,
+        }
+    }
+}
+
+/// What this machine would draw with, stated so another machine can compare it.
+///
+/// Assembled here rather than in either crate that supplies a piece of it: the
+/// epoch is the compositor's, the pin is the sandbox's, and neither should have
+/// to know about the other. This is the one place that already knows both.
+///
+/// The plan is what says where the session would run, so this is derived from
+/// the same plan `doctor` prints and `run` executes — a fingerprint for a
+/// session that would never have started is worse than none.
+fn fingerprint_of(
+    plan: Result<&waypuppet_sandbox::Plan, &String>,
+    software: bool,
+    renders: bool,
+) -> waypuppet_fingerprint::Fingerprint {
+    use waypuppet_fingerprint::{Pin, Renderer, Unpinned};
+
+    let pin = match plan {
+        Ok(waypuppet_sandbox::Plan::Reenter(reenter)) => match &reenter.runtime {
+            waypuppet_sandbox::Runtime::Flatpak(runtime) => {
+                waypuppet_sandbox::runtime_commit(runtime).map_or_else(
+                    || {
+                        Pin::Nothing(Unpinned::UnknownCommit {
+                            runtime: runtime.to_string(),
+                        })
+                    },
+                    |commit| Pin::Runtime {
+                        id: runtime.id.clone(),
+                        branch: runtime.branch.clone(),
+                        commit,
+                    },
+                )
+            }
+            waypuppet_sandbox::Runtime::Image { reference, .. } => {
+                Pin::Nothing(Unpinned::Image(reference.clone()))
+            }
+        },
+        // Running here, or unable to run anywhere. Either way there is no
+        // runtime behind the pixels, and saying so is the point.
+        Ok(waypuppet_sandbox::Plan::Direct(_)) | Err(_) => Pin::Nothing(Unpinned::Host),
+    };
+
+    waypuppet_fingerprint::Fingerprint {
+        epoch: waypuppet_compositor::RENDER_EPOCH,
+        arch: std::env::consts::ARCH.to_owned(),
+        // `--software` forces llvmpipe; otherwise it is software only when
+        // there was no hardware to be had. Reported as the class that would
+        // actually be used, not as the flag that was passed, because a machine
+        // with no GPU renders in software whether or not anybody asked.
+        renderer: if software || !renders {
+            Renderer::Software
+        } else {
+            Renderer::Hardware
+        },
+        pin,
+    }
+}
+
+/// Everything `fingerprint` takes, grouped so the verb stays one line.
+#[derive(Debug, Args)]
+struct FingerprintArgs {
+    /// Render with llvmpipe, matching how the captures were taken.
+    #[arg(long)]
+    software: bool,
+    /// Print the whole record rather than the digest.
+    #[arg(long, conflicts_with_all = ["record", "expect"])]
+    explain: bool,
+    /// Print the canonical form, for checking in beside golden images.
+    #[arg(long, conflicts_with_all = ["explain", "expect"])]
+    record: bool,
+    /// Check against a recorded canonical form, or a digest.
+    #[arg(long, value_name = "FINGERPRINT")]
+    expect: Option<String>,
+    #[command(flatten)]
+    sandbox: SandboxArgs,
+}
+
+/// Report or check the render fingerprint.
+fn fingerprint(args: &FingerprintArgs, socket: &Path, json: bool) -> Result<ExitCode, String> {
+    let options = args.sandbox.options()?;
+    let devices = waypuppet_compositor::probe();
+    let renders = devices.as_ref().is_ok_and(|devices| !devices.is_empty());
+    let facts = waypuppet_sandbox::examine(renders, options.sandbox);
+    let captures = waypuppet_sandbox::settle(&default_capture_dir(socket));
+    let plan = sandbox::plan(&options, &[], socket, &captures, &facts);
+
+    let observed = fingerprint_of(plan.as_ref(), args.software, renders);
+
+    if let Some(expect) = &args.expect {
+        let expectation = waypuppet_fingerprint::Expectation::parse(expect)?;
+        return Ok(report_expectation(&expectation, &observed));
+    }
+
+    match FingerprintOutput::chosen(json, args.record, args.explain) {
+        FingerprintOutput::Digest => println!("{}", observed.digest()),
+        FingerprintOutput::Record => println!("{}", observed.canonical()),
+        FingerprintOutput::Explain => print_fingerprint(&observed),
+        FingerprintOutput::Json => println!("{}", fingerprint_json(&observed)),
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Print the human-readable form.
+fn print_fingerprint(observed: &waypuppet_fingerprint::Fingerprint) {
+    println!("epoch       {}", observed.epoch);
+    println!("arch        {}", observed.arch);
+    println!("renderer    {}", observed.renderer);
+    println!("runtime     {}", observed.pin);
+    println!("digest      {}", observed.digest());
+    if let waypuppet_fingerprint::Pin::Nothing(why) = &observed.pin {
+        println!();
+        println!("Not pinned, so a capture here is not reproducible elsewhere.");
+        println!("{}", why.fix());
+    }
+}
+
+/// The machine-readable form.
+fn fingerprint_json(observed: &waypuppet_fingerprint::Fingerprint) -> serde_json::Value {
+    serde_json::json!({
+        "epoch": observed.epoch.0,
+        "arch": observed.arch,
+        "renderer": observed.renderer.to_string(),
+        "runtime": observed.pin.to_string(),
+        "pinned": observed.pinned(),
+        "canonical": observed.canonical(),
+        "digest": observed.digest(),
+    })
+}
+
+/// Compare against what the caller pinned, and say what moved.
+///
+/// A mismatch is exit 3, the same code `wait` uses for a condition that did not
+/// hold. It is the same kind of answer: the renderer changed is something a
+/// script may well be checking for, and it must not look like waypuppet failing.
+fn report_expectation(
+    expectation: &waypuppet_fingerprint::Expectation,
+    observed: &waypuppet_fingerprint::Fingerprint,
+) -> ExitCode {
+    use waypuppet_fingerprint::Verdict;
+
+    match expectation.check(observed) {
+        Verdict::Match => {
+            println!("{}", observed.digest());
+            ExitCode::SUCCESS
+        }
+        Verdict::Opaque { expected, observed } => {
+            eprintln!("waypuppet: the render fingerprint changed");
+            eprintln!("  expected {expected}");
+            eprintln!("  observed {observed}");
+            eprintln!();
+            eprintln!(
+                "A digest cannot say what moved. Record the canonical form with \
+                 `waypuppet fingerprint --record` and pin that instead."
+            );
+            expectation_unmet()
+        }
+        Verdict::Explained(differences) => {
+            eprintln!("waypuppet: the render fingerprint changed");
+            for difference in &differences {
+                eprintln!("  {difference}");
+            }
+            expectation_unmet()
+        }
+    }
 }
 
 /// Where a detached session's own stdout and stderr go.
@@ -1367,6 +1587,10 @@ fn doctor(args: &SandboxArgs, socket: &Path, json: bool) -> Result<ExitCode, Str
             devices.as_deref().unwrap_or_default(),
             &facts,
             plan.as_ref(),
+            // `false`: this reports what the machine would do left alone.
+            // `waypuppet fingerprint --software` is how to ask what the
+            // captures a golden suite takes would be pinned to instead.
+            &fingerprint_of(plan.as_ref(), false, renders),
         ));
     }
 
@@ -1432,6 +1656,7 @@ fn doctor_json(
     devices: &[waypuppet_compositor::RenderDevice],
     facts: &waypuppet_sandbox::Facts,
     plan: Result<&waypuppet_sandbox::Plan, &String>,
+    fingerprint: &waypuppet_fingerprint::Fingerprint,
 ) -> ExitCode {
     let rendered: Vec<_> = devices
         .iter()
@@ -1460,6 +1685,7 @@ fn doctor_json(
             "devices": rendered,
             "enclosure": facts.enclosure.to_string(),
             "sandbox": sandbox,
+            "fingerprint": fingerprint_json(fingerprint),
         })
     );
     if plan.is_ok() {

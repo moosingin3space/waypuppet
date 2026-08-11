@@ -9,6 +9,8 @@ edition.workspace = true
 workspace = true
 
 [dependencies]
+# For `Unpinned`, which `runtime_commit` documents the absence of a commit against.
+waypuppet-fingerprint.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 toml.workspace = true
