@@ -110,6 +110,10 @@ enum Command {
         #[arg(long)]
         software: bool,
         /// Leave the session running in the background and return immediately.
+        ///
+        /// The session's own diagnostics go to `<socket>.log`, because a
+        /// detached session must not hold the caller's stdout open. Use `logs`
+        /// for what the client wrote; this file is waypuppet's own.
         #[arg(long)]
         detach: bool,
         /// Where captures land when `shot` does not name a path.
@@ -609,6 +613,37 @@ fn default_capture_dir(socket: &Path) -> PathBuf {
     socket.with_extension("captures")
 }
 
+/// Where a detached session's own stdout and stderr go.
+///
+/// **A detached session must not keep the caller's stdout and stderr open.**
+/// Inheriting them costs nothing until somebody reads them, and then it costs
+/// everything: a pipe, a command substitution or a test harness capturing output
+/// blocks until the *session* exits, because the session is still holding the
+/// write end. `run --detach` returns promptly and the caller hangs anyway, which
+/// reads as `--detach` being broken and is the wrong thing to go looking at.
+///
+/// The sandboxed path has always redirected, for the same reason. This is that
+/// rule applied to the one path that did not.
+///
+/// A file rather than `/dev/null`, beside the socket and named the way the
+/// capture directory is, because these are the messages that explain a session
+/// that came up wrong. Falling back to discarding them is deliberate: an
+/// unwritable directory is a reason to lose the diagnostics, not a reason to
+/// refuse to start.
+fn detached_diagnostics(socket: &Path) -> (std::process::Stdio, std::process::Stdio) {
+    let path = socket.with_extension("log");
+    let Ok(file) = std::fs::File::create(&path) else {
+        tracing::debug!(path = %path.display(), "no log file; discarding the session's output");
+        return (std::process::Stdio::null(), std::process::Stdio::null());
+    };
+    // One description, two handles, so both streams interleave into one file in
+    // the order they were written rather than overwriting each other.
+    match file.try_clone() {
+        Ok(clone) => (file.into(), clone.into()),
+        Err(_) => (file.into(), std::process::Stdio::null()),
+    }
+}
+
 /// Everything about a session that is fixed for its lifetime.
 ///
 /// Grouped because it has to survive a re-execution intact: `run` may start the
@@ -753,9 +788,12 @@ async fn run(
     }
 
     let exe = std::env::current_exe().map_err(|error| error.to_string())?;
+    let (stdout, stderr) = detached_diagnostics(socket);
     std::process::Command::new(exe)
         .args(&serve_args)
         .stdin(std::process::Stdio::null())
+        .stdout(stdout)
+        .stderr(stderr)
         .spawn()
         .map_err(|error| error.to_string())?;
 
