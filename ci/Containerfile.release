@@ -1,0 +1,64 @@
+# The image the distributable waypuppet binary is built in.
+#
+# Separate from ci/Containerfile, which is for *testing*, and the split is the point.
+# That one tracks whatever the Flatpak SDK ships so CI predicts what a contributor sees;
+# this one is pinned to the oldest glibc waypuppet promises to run against, and is
+# deliberately allowed to lag. Merging them would tie the distribution floor to whatever
+# the test image happened to update to.
+#
+# Ubuntu 22.04 is glibc 2.35, and is the floor rather than the newest thing that works:
+# it covers Debian 12, CentOS Stream 10 and current Fedora, and building against it costs
+# nothing. A binary built here runs on all of them; one built on CentOS Stream 10 — glibc
+# 2.39 — would not run on 22.04, which is why "either of those" is not a choice.
+#
+# What makes this workable at all is that waypuppet needs almost nothing at load time.
+# libEGL is dlopened, not linked, so the binary starts on a machine with no GPU stack and
+# `doctor` can say so — which is the property the whole sandbox-autonomy feature rests on.
+# ci/abi-baseline.sh asserts it, because nothing else would notice it going away.
+
+FROM docker.io/library/ubuntu:22.04
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# The same library set ci/Containerfile installs, and for the same reasons — but note that
+# these are *build-time* requirements. Only libwayland-server and libxkbcommon survive into
+# the binary's NEEDED list; EGL, GBM and libdrm are reached through dlopen or not at all.
+RUN apt-get update \
+    && apt-get install --no-install-recommends --yes \
+        build-essential \
+        pkg-config \
+        ca-certificates \
+        curl \
+        git \
+        libwayland-dev \
+        libxkbcommon-dev \
+        libegl-dev \
+        libgles-dev \
+        libgbm-dev \
+        libdrm-dev \
+        clang \
+        libclang-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# The toolchain comes from mise and mise.toml, the same single source of truth the Justfile
+# and the test image use. The compiler is not what the glibc floor is about, and pinning it
+# somewhere else here would make three places to bump instead of one.
+ENV MISE_DATA_DIR=/opt/mise
+ENV MISE_INSTALL_PATH=/usr/local/bin/mise
+ENV PATH=/opt/mise/shims:$PATH
+ENV MISE_TRUSTED_CONFIG_PATHS=/workspace
+RUN curl --fail --silent --show-error --location https://mise.run | sh
+
+COPY mise.toml /tmp/waypuppet/mise.toml
+RUN mise trust /tmp/waypuppet/mise.toml \
+    && mise install --cd /tmp/waypuppet \
+    && rm -rf /tmp/waypuppet
+
+# Asserted at build time rather than discovered when a release fails to run somewhere: if
+# this image is not the glibc it claims to be, everything downstream of it is wrong.
+RUN test "$(getconf GNU_LIBC_VERSION | awk '{print $2}')" = "2.35" \
+    || { echo "expected glibc 2.35, got $(getconf GNU_LIBC_VERSION)" >&2; exit 1; }
+
+WORKDIR /workspace

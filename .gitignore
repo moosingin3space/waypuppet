@@ -1,2 +1,9 @@
 /target
 ci/.cache/
+# The release build keeps its own cargo cache and target directory, so it never
+# fights the Flatpak build for target/flatpak nor the CI image for ci/.cache.
+ci/.cache-release/
+# The distributable binary itself. Built by `just release`, published from a
+# release job — never committed, because a checked-in binary is one nobody can
+# tell was built from the checkout beside it.
+ci/release/

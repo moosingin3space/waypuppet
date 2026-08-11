@@ -118,3 +118,21 @@ ci:
 [doc("Drive a real GTK application under waypuppet, in the CI image.")]
 toolkit:
     ci/run.sh ci/toolkit-smoke.sh
+
+# The distributable binary is built somewhere older than anything else here, and
+# deliberately: it is glibc 2.35 (Ubuntu 22.04), which is the floor waypuppet
+# promises to run against. The Flatpak SDK is newer and the CI image is newer
+# still, so neither of them can answer "will this run on a stranger's machine".
+
+# Build the release binary against the oldest supported glibc, and check its ABI.
+[doc("Build the distributable binary and assert what it needs to run.")]
+release:
+    ci/release.sh
+
+# Cheap enough to run against any binary, and worth running against one built any
+# other way before wondering why it will not start somewhere.
+
+# Assert a binary's glibc floor and load-time dependencies.
+[doc("Check a binary against the distribution ABI baseline.")]
+abi binary="ci/release/waypuppet":
+    ci/abi-baseline.sh {{ binary }}
