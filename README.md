@@ -190,11 +190,49 @@ drive a session too, but the command line is the product.
 | `waypuppet tree` | the accessibility tree |
 | `waypuppet logs` | what the client printed |
 | `waypuppet kill` | stop it |
+| `waypuppet fingerprint` | what a capture's pixels depend on, for pinning golden images |
 
 Mutating verbs settle before they return: `click` waits for the frame the click caused, so
 `click` followed by `shot` is correct without a sleep between them. `wait` covers the rest —
 `--windows`, `--title`, `--frames`, `--idle` and `--exit`, each answered from something the
 compositor observed rather than from a timer.
+
+## Installing
+
+A prebuilt binary, built against glibc 2.35 so it runs on anything newer:
+
+```
+tar xzf waypuppet-*-x86_64-linux.tar.gz
+install -m755 waypuppet ~/.local/bin/
+waypuppet doctor
+```
+
+One file, and it needs almost nothing from the machine: `libwayland-server` and
+`libxkbcommon`, both on every desktop. `libEGL` is opened at run time rather than linked,
+which is why waypuppet *starts* on a machine with no GPU stack — and starting is what lets
+`doctor` tell you so instead of dying with a linker error.
+
+`cargo install` works too, if you would rather build it, but note that it needs the `-devel`
+packages for the libraries above. Not having them is the situation this project exists
+inside; the prebuilt binary is the path that does not care.
+
+### For a coding agent
+
+waypuppet exists because an agent could build a GUI application and launch it but had no
+way to see whether anything rendered. The skill in [`skills/waypuppet`](skills/waypuppet)
+teaches one to use it — the loop, the waits, the selectors, and the handful of mistakes
+that otherwise cost an afternoon each:
+
+```
+gh skill install mooscodes/waypuppet waypuppet --agent claude-code --scope user
+```
+
+`--scope project` puts it in the repository instead, shared with any other agent that
+reads the same convention. Or copy `skills/waypuppet/` into `~/.claude/skills/` by hand;
+there is nothing in it but a `SKILL.md`.
+
+Only the observational verbs are pre-approved in it. `run` executes an arbitrary command,
+so it asks.
 
 ## Status
 
