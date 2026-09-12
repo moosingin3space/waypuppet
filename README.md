@@ -1,10 +1,10 @@
 # waypuppet
 
-Run a GUI application inside a headless Wayland compositor, then look at it and drive it
-from the command line.
+Run any GUI application inside a headless Wayland compositor, then inspect and drive it
+from the command line. Use it to test arbitrary GUIs without a display.
 
 ```
-$ waypuppet run --detach -- ./target/debug/example-app-app
+$ waypuppet run --detach -- ./target/debug/my-app
 session default started
 
 $ waypuppet wait --windows 1
@@ -46,7 +46,7 @@ Everything follows from owning the compositor rather than scripting somebody els
 - **Captures cannot race repaints.** The compositor knows when a client commits a buffer,
   because the client tells it. A capture is a specific committed frame, not a snapshot of
   whatever happened to be on a screen at the time.
-- **Waiting is precise.** "Two windows are mapped", "the title matches `/example-app/`", "two
+- **Waiting is precise.** "Two windows are mapped", "the title matches `/Settings/`", "two
   more frames have been committed", "nothing has been drawn for 200ms" are facts observed
   on the wire. None of them is a `sleep`.
 - **It is isolated and reproducible.** A fixed output size, a fixed scale, one client and
@@ -56,10 +56,10 @@ Everything follows from owning the compositor rather than scripting somebody els
   it saw and hands back the output the process wrote before it went:
 
   ```
-  $ waypuppet run -- ./target/debug/example-app-app
+  $ waypuppet run -- ./target/debug/my-app
   session default: client exited 0 after 340ms without mapping a window
   --- stderr ---
-  thread 'main' panicked at crates/example-app-app/src/main.rs:42
+  application exited before it mapped a window
   ```
 
 ## Beyond pixels
@@ -218,9 +218,9 @@ inside; the prebuilt binary is the path that does not care.
 
 ### For a coding agent
 
-waypuppet exists because an agent could build a GUI application and launch it but had no
-way to see whether anything rendered. The skill in [`skills/waypuppet`](skills/waypuppet)
-teaches one to use it — the loop, the waits, the selectors, and the handful of mistakes
+waypuppet exists because an agent can launch a GUI application but has no reliable way to
+see or test it. The skill in [`skills/waypuppet`](skills/waypuppet) teaches one to use it —
+the loop, the waits, the selectors, and the handful of mistakes
 that otherwise cost an afternoon each:
 
 ```
@@ -284,14 +284,11 @@ and your application in there together — see [plan 08](plans/08-sandbox-autono
 `gtk3-widget-factory` has been hosted inside a container and driven entirely from outside
 it: waited for, inspected, clicked by selector, and captured.
 
-**Not yet.** Pointing all of this at [example-app] rather than at GTK, which is what the
-project was started for and is now unblocked rather than done.
-
 [CLAUDE.md] has the architecture, [plans/](plans/) has one file per phase with its status
 and what it taught us, and [docs/](docs/) covers using waypuppet in CI.
 
-Built to test [example-app], which is why the next things to work are the ones a terminal
-application needs: text input, key repeat, clipboard and resize.
+The project is built to test arbitrary GUIs: inspect their rendered output, accessibility
+trees and logs, then drive them with deterministic input and protocol-level waits.
 
 ## Name
 
@@ -301,5 +298,4 @@ It puppets a Wayland client. It also holds the strings.
 [tarpc]: https://lib.rs/crates/tarpc
 [AccessKit]: https://accesskit.dev/
 [freya]: https://freyaui.dev/
-[example-app]: ../example-app
 [CLAUDE.md]: CLAUDE.md
