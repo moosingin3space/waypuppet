@@ -501,8 +501,7 @@ impl Socket {
 
         let unique = connection
             .unique_name()
-            .map(ToString::to_string)
-            .unwrap_or_default();
+            .map_or_else(String::new, ToString::to_string);
         (unique, root_path())
     }
 

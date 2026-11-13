@@ -53,7 +53,7 @@ fn the_control_socket_answers_and_shuts_down() {
             .expect("the call reached the session")
             .expect("status succeeds");
         assert_eq!(status.output, OUTPUT);
-        assert!(status.windows.is_empty(), "nothing has connected yet");
+        assert_eq!(status.windows, [], "nothing has connected yet");
         assert_eq!(
             status.client,
             ClientState::Running,

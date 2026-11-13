@@ -207,7 +207,7 @@ fn a_space_is_the_descendant_axis_and_a_hyphen_is_part_of_a_role() {
     // whole reason roles are hyphenated in a type selector: `list item` would
     // otherwise be two steps.
     let one_step = parse("list-item").unwrap();
-    assert!(one_step.rest.is_empty());
+    assert_eq!(one_step.rest, []);
     assert_eq!(one_step.first.role, Some(exact("list item")));
 
     let two_steps = parse("list button").unwrap();

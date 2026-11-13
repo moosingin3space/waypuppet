@@ -1631,7 +1631,7 @@ fn fill(buffer: &mut GbmBuffer, rgba: [u8; 4]) -> Result<(), String> {
             let pixels = mapping.buffer_mut();
             for y in 0..height as usize {
                 let start = y * stride;
-                for chunk in pixels[start..start + row].chunks_exact_mut(4) {
+                for chunk in pixels[start..start + row].as_chunks_mut::<4>().0 {
                     chunk.copy_from_slice(&pixel);
                 }
             }

@@ -363,8 +363,9 @@ async fn report_exit(inner: &Arc<Inner>, code: Option<i32>, lifetime: Duration) 
         .commands
         .ask(COMPOSITOR_DEADLINE, Command::Status)
         .await
-        .map(|snapshot| snapshot.windows.iter().filter(|w| w.mapped).count())
-        .unwrap_or_default();
+        .map_or(0, |snapshot| {
+            snapshot.windows.iter().filter(|w| w.mapped).count()
+        });
 
     let outcome = match code {
         Some(code) => format!("exited {code}"),
@@ -616,10 +617,11 @@ impl Waypuppet for Server {
         }
     }
 
-    async fn kill(self, _: Context) -> Result<(), Failure> {
-        self.0.commands.send(Command::Stop)?;
-        self.0.shutdown.notify_waiters();
-        Ok(())
+    fn kill(self, _: Context) -> impl std::future::Future<Output = Result<(), Failure>> {
+        let result = self.0.commands.send(Command::Stop).map(|()| {
+            self.0.shutdown.notify_waiters();
+        });
+        std::future::ready(result)
     }
 
     // Every mutating verb settles: it returns once the client has drawn in
