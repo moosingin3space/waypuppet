@@ -2182,7 +2182,6 @@ dependencies = [
  "thiserror",
  "toml",
  "tracing",
- "waypuppet-fingerprint",
 ]
 
 [[package]]

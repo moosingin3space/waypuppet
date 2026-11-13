@@ -131,7 +131,7 @@ fn flatpak_runtimes() -> Option<Vec<FlatpakRuntime>> {
 /// you and say nothing.
 ///
 /// `None` rather than an error, because a fingerprint that cannot be pinned is a
-/// real answer with its own fix. See [`waypuppet_fingerprint::Unpinned`].
+/// real answer with its own fix. The fingerprint reports why it is unpinned.
 #[must_use]
 pub fn runtime_commit(runtime: &FlatpakRuntime) -> Option<String> {
     which("flatpak")?;

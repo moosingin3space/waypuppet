@@ -371,7 +371,7 @@ mod tests {
         // Silence is the honest answer when the caller has named a category
         // AT-SPI has no role for. Offering a distant role would be worse than
         // offering none: it reads as confirmation.
-        assert!(suggest("qwertyuiopasdfgh").is_empty());
+        assert_eq!(suggest("qwertyuiopasdfgh"), [] as [&str; 0]);
     }
 
     #[test]
