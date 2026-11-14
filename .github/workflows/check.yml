@@ -149,3 +149,47 @@ jobs:
           name: toolkit-captures
           path: ci/.cache/smoke/
           if-no-files-found: warn
+
+  freya:
+    name: Freya decoration and input
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build the CI image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ci/Containerfile
+          tags: waypuppet-ci:local
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Freya has its own lockfile and Skia build products. Keep its cache key
+      # separate from the other jobs so concurrent saves cannot collide.
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ci/.cache/cargo
+            ci/.cache/target
+          key: cargo-freya-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'ci/freya-smoke/Cargo.lock', 'ci/Containerfile') }}
+          restore-keys: cargo-freya-${{ runner.os }}-
+
+      - name: Freya fixture formatting
+        run: ci/run.sh cargo fmt --manifest-path ci/freya-smoke/Cargo.toml --check
+
+      - name: Drive Freya under waypuppet
+        run: ci/run.sh sh ci/freya-smoke.sh
+
+      - name: Upload Freya diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: freya-diagnostics
+          path: ci/.cache/freya-smoke/
+          if-no-files-found: warn

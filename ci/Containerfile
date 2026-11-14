@@ -65,6 +65,16 @@ RUN apt-get update \
         fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
+# Freya's prebuilt Skia links to fontconfig, FreeType and desktop GL. Python
+# checks the accessibility tree and decoration probe in the Freya smoke test.
+RUN apt-get update \
+    && apt-get install --no-install-recommends --yes \
+        libfontconfig-dev \
+        libfreetype-dev \
+        libgl-dev \
+        python3 \
+    && rm -rf /var/lib/apt/lists/*
+
 # mise supplies the compiler, from the same mise.toml the Justfile uses locally, so the
 # pinned toolchain has one source rather than two.
 ENV MISE_DATA_DIR=/opt/mise

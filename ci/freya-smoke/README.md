@@ -8,6 +8,11 @@ probe must report the policy and acknowledged mode, and client mode must expose
 the shifted root surface origin. Captures, probes, and trees are saved under
 `ci/.cache/freya-smoke/<policy>/`.
 
+The `freya` CI job runs the same script in the CI image and uploads that directory
+as the `freya-diagnostics` artifact, including on failure. Use
+`ci/run.sh sh ci/freya-smoke.sh` to reproduce that job locally; it also runs as part
+of `just ci`.
+
 The nested button is a separate diagnostic for Freya's `Input::trailing` behavior.
 It still does not activate in 0.5.2, including when clicked at the correct visible
 coordinates. That behavior is not an expected Waypuppet test outcome.

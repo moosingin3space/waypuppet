@@ -93,7 +93,7 @@ allowed to be slower and rarer, never as the one that gates merges.
 
 ## What runs
 
-Two jobs, both on `ubuntu-latest`, both in the image.
+Three jobs, all on `ubuntu-latest`, all in the image.
 
 **`check`** is `just check` plus a probe: `cargo fmt --all --check`, `cargo clippy
 --workspace --all-targets`, `cargo test --workspace`, then `waypuppet doctor` — which must
@@ -105,9 +105,18 @@ that ever changes it should be noticed on purpose rather than by a test behaving
 captures as artifacts whatever the outcome, because a screenshot of the moment it went
 wrong diagnoses this class of failure on sight.
 
-Both run through [`ci/run.sh`](../ci/run.sh), the same script `just ci` uses. CI has no
+All run through [`ci/run.sh`](../ci/run.sh), the same script `just ci` uses. CI has no
 private incantation; if it fails and your machine does not, the difference is the image,
 not the commands.
+
+The **`freya`** job runs [`ci/freya-smoke.sh`](../ci/freya-smoke.sh) against the
+pinned Freya 0.5.2 fixture. It verifies decoration probes and selector activation
+under server, client, and auto policies, then clicks the client titlebar's close
+button to check subsurface input. Its Cargo cache includes both lockfiles and has
+a separate job key. Captures, trees, and probe results are uploaded as
+`freya-diagnostics`, including on failure. Run the same test locally with
+`ci/run.sh sh ci/freya-smoke.sh`, or `just freya` in the Flatpak SDK. `just ci`
+includes the CI-container version.
 
 ## The fixture is not a toolkit
 

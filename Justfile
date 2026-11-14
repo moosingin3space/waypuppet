@@ -112,6 +112,8 @@ ci:
     ci/run.sh cargo clippy --workspace --all-targets
     ci/run.sh cargo test --workspace
     ci/run.sh cargo run --quiet -p waypuppet -- doctor
+    ci/run.sh cargo fmt --manifest-path ci/freya-smoke/Cargo.toml --check
+    ci/run.sh sh ci/freya-smoke.sh
 
 # The unit suite proves the protocol against a fixture that behaves better than any real
 # toolkit. This proves the thing the fixture cannot.
