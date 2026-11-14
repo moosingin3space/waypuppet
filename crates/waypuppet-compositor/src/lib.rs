@@ -108,6 +108,8 @@ pub struct Config {
     pub scale: f64,
     /// Which device to render on.
     pub rendering: Rendering,
+    /// Decoration negotiation policy for all windows.
+    pub decorations: waypuppet_proto::DecorationPolicy,
     /// Where captures land when a request does not name a path.
     pub capture_dir: PathBuf,
 }
@@ -121,6 +123,7 @@ impl Default for Config {
             },
             scale: 1.0,
             rendering: Rendering::default(),
+            decorations: waypuppet_proto::DecorationPolicy::default(),
             capture_dir: std::env::temp_dir(),
         }
     }
@@ -147,7 +150,8 @@ impl Default for Config {
 /// | epoch | what it covers |
 /// |-------|----------------|
 /// | 1     | the first stated epoch. GLES offscreen render, `ExportMem` readback, PNG via the `png` crate. |
-pub const RENDER_EPOCH: waypuppet_fingerprint::Epoch = waypuppet_fingerprint::Epoch(1);
+/// | 2     | Negotiate server-side decorations: supporting clients render without fallback titlebars. |
+pub const RENDER_EPOCH: waypuppet_fingerprint::Epoch = waypuppet_fingerprint::Epoch(2);
 
 /// A rendering device waypuppet could use.
 #[derive(Debug, Clone)]

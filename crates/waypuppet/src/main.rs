@@ -119,6 +119,10 @@ enum Command {
         /// is made to match it.
         #[arg(long)]
         software: bool,
+        /// Decoration policy: server draws no chrome; client requests toolkit
+        /// decorations; auto honors the client's preference.
+        #[arg(long, value_parser = ["auto", "client", "server"], default_value = "server")]
+        decorations: String,
         /// Leave the session running in the background and return immediately.
         ///
         /// The session's own diagnostics go to `<socket>.log`, because a
@@ -177,6 +181,11 @@ enum Command {
     /// Stop the client and shut the session down.
     Kill,
 
+    /// Probe decoration negotiation and surface geometry for every window.
+    /// Negotiated mode describes responsibility; arbitrary client pixels cannot
+    /// be identified as decorations. Use --json for structured observations.
+    Decorations,
+
     /// Run a session in the foreground, serving a control socket.
     ///
     /// `run` starts this for you. Reach for it directly when you want the
@@ -196,6 +205,10 @@ enum Command {
         /// Render with llvmpipe even where a GPU is available.
         #[arg(long)]
         software: bool,
+        /// Decoration policy: server draws no chrome; client requests toolkit
+        /// decorations; auto honors the client's preference.
+        #[arg(long, value_parser = ["auto", "client", "server"], default_value = "server")]
+        decorations: String,
         /// Exit when the spawned command does.
         #[arg(long)]
         exit_with_child: bool,
@@ -538,16 +551,20 @@ async fn dispatch(cli: Cli) -> ExitCode {
             size,
             scale,
             software,
+            decorations,
             exit_with_child,
             capture_dir,
             argv,
         } => {
             serve(
                 &socket,
-                &size,
-                scale,
-                software,
-                capture_dir,
+                Shape {
+                    size: &size,
+                    scale,
+                    software,
+                    decorations: &decorations,
+                    capture_dir,
+                },
                 &argv,
                 exit_with_child,
             )
@@ -557,6 +574,7 @@ async fn dispatch(cli: Cli) -> ExitCode {
             size,
             scale,
             software,
+            decorations,
             detach,
             capture_dir,
             sandbox,
@@ -569,6 +587,7 @@ async fn dispatch(cli: Cli) -> ExitCode {
                     size: &size,
                     scale,
                     software,
+                    decorations: &decorations,
                     capture_dir,
                 },
                 &sandbox,
@@ -578,6 +597,7 @@ async fn dispatch(cli: Cli) -> ExitCode {
             .await
         }
         Command::Ps => ps(&socket, cli.json).await,
+        Command::Decorations => decorations(&socket, cli.json).await,
         Command::Shot { window, output } => shot(&socket, window, output, cli.json).await,
         Command::Logs { follow } => logs(&socket, follow).await,
         Command::Sessions => sessions().await,
@@ -892,6 +912,7 @@ struct Shape<'a> {
     size: &'a str,
     scale: f64,
     software: bool,
+    decorations: &'a str,
     capture_dir: Option<PathBuf>,
 }
 
@@ -918,6 +939,8 @@ impl Shape<'_> {
             self.size.to_owned(),
             "--scale".to_owned(),
             self.scale.to_string(),
+            "--decorations".to_owned(),
+            self.decorations.to_owned(),
             // Always stated, never inherited. Inside a sandbox the default would
             // be resolved against a `/tmp` that is private to it, and the
             // captures would be written somewhere the caller cannot look.
@@ -941,18 +964,18 @@ impl Shape<'_> {
 /// Run a session in this process.
 async fn serve(
     socket: &Path,
-    size: &str,
-    scale: f64,
-    software: bool,
-    capture_dir: Option<PathBuf>,
+    shape: Shape<'_>,
     argv: &[String],
     exit_with_child: bool,
 ) -> Result<ExitCode, String> {
     let config = config(
-        size,
-        scale,
-        software,
-        capture_dir.unwrap_or_else(|| default_capture_dir(socket)),
+        shape.size,
+        shape.scale,
+        shape.software,
+        shape.decorations,
+        shape
+            .capture_dir
+            .unwrap_or_else(|| default_capture_dir(socket)),
     )?;
     let exit = session::serve(&config, socket, argv, exit_with_child)
         .await
@@ -998,10 +1021,10 @@ async fn run(
             if !detach {
                 return serve(
                     socket,
-                    shape.size,
-                    shape.scale,
-                    shape.software,
-                    Some(captures),
+                    Shape {
+                        capture_dir: Some(captures),
+                        ..shape
+                    },
                     argv,
                     true,
                 )
@@ -1043,6 +1066,47 @@ async fn run(
 }
 
 /// List the session's windows.
+async fn decorations(socket: &Path, json: bool) -> Result<ExitCode, String> {
+    let session = client::connect(socket).await?;
+    let status = session
+        .status(client::deadline(client::DEADLINE))
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|failure| failure.to_string())?;
+    if json {
+        let windows: Vec<_> = status
+            .windows
+            .iter()
+            .map(|window| {
+                serde_json::json!({"id": window.id, "geometry": window.geometry,
+                "decorations": window.decorations})
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string(&windows).map_err(|error| error.to_string())?
+        );
+    } else {
+        for window in status.windows {
+            let d = window.decorations;
+            println!(
+                "{} policy={:?} negotiated={} surface-origin={},{} bounds={},{} {}x{}",
+                window.id.0,
+                d.policy,
+                d.negotiated
+                    .map_or_else(|| "unknown".to_owned(), |mode| format!("{mode:?}")),
+                d.surface_origin.x,
+                d.surface_origin.y,
+                d.surface_bounds.origin.x,
+                d.surface_bounds.origin.y,
+                d.surface_bounds.size.width,
+                d.surface_bounds.size.height
+            );
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
 async fn ps(socket: &Path, json: bool) -> Result<ExitCode, String> {
     let session = client::connect(socket).await?;
     let status = session
@@ -1728,6 +1792,7 @@ fn config(
     size: &str,
     scale: f64,
     software: bool,
+    decorations: &str,
     capture_dir: PathBuf,
 ) -> Result<waypuppet_compositor::Config, String> {
     let output =
@@ -1739,6 +1804,12 @@ fn config(
             Rendering::Software
         } else {
             Rendering::Fastest
+        },
+        decorations: match decorations {
+            "auto" => waypuppet_proto::DecorationPolicy::Auto,
+            "client" => waypuppet_proto::DecorationPolicy::Client,
+            "server" => waypuppet_proto::DecorationPolicy::Server,
+            _ => return Err(format!("unknown decoration policy: {decorations}")),
         },
         capture_dir,
     })
@@ -1849,5 +1920,30 @@ fn parse_button(text: &str) -> Option<Button> {
         "right" | "r" | "3" => Some(Button::Right),
         "middle" | "m" | "2" => Some(Button::Middle),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decoration_policy_survives_serve_reexecution() {
+        for policy in ["auto", "client", "server"] {
+            let shape = Shape {
+                size: "640x480",
+                scale: 1.0,
+                software: true,
+                decorations: policy,
+                capture_dir: None,
+            };
+            let arguments = shape.serve_args("decorations", Path::new("/captures"), &[], true);
+            let cli = Cli::try_parse_from(std::iter::once("waypuppet".to_owned()).chain(arguments))
+                .expect("generated serve arguments must parse");
+            let Command::Serve { decorations, .. } = cli.command else {
+                panic!("reexecution must use serve");
+            };
+            assert_eq!(decorations, policy);
+        }
     }
 }

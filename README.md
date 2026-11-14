@@ -41,6 +41,7 @@ where supported.
 | --- | --- |
 | `doctor`, `setup` | Check the runtime or install one. |
 | `run`, `sessions`, `ps`, `kill` | Start, inspect, and stop sessions. |
+| `decorations` | Probe decoration negotiation and surface geometry. |
 | `shot`, `logs` | Capture a PNG or read the application's output. |
 | `tree`, `select` | Inspect the accessibility tree and find a widget. |
 | `click`, `move`, `scroll` | Send pointer input. |
@@ -54,6 +55,26 @@ For example, `waypuppet tree --selectors` shows selectors for accessible widgets
 Use `waypuppet select 'button[name="Save"]'` to check a selector, then use
 `waypuppet click --on 'button[name="Save"]'` to click it. Selector syntax is a subset
 of CSS; run `waypuppet select --help` for the supported forms.
+
+`run` and `serve` accept `--decorations server|client|auto`:
+
+- `server` (the default) negotiates compositor decorations and draws no window chrome.
+- `client` requests toolkit decorations, useful for testing decorated windows.
+- `auto` honors the client's preference, defaulting to server mode when none is set.
+
+Use `waypuppet decorations` or `waypuppet decorations --json` to probe each window.
+The result includes the policy, acknowledged mode, root surface origin, and full
+surface bounds (also available in `ps --json`). `negotiated: null` means no mode
+has been acknowledged, including clients that do not support xdg-decoration.
+Negotiation describes responsibility, not visible pixels: some clients always draw
+their own header bars. Inspect a capture to see what they painted.
+
+Window input coordinates and accessibility bounds are relative to the root content
+surface; decoration offsets are translated by the compositor. The probe reports
+that surface's origin in output coordinates, so a point can also be located in a
+capture. Input is routed to the actual surface under the pointer, including decoration
+subsurfaces. Keep the same decoration policy when comparing golden images; the
+rendering fingerprint does not encode session settings such as this policy or output size.
 
 Input commands wait for a client frame after they send input. If the application does not
 draw a frame before the settle timeout, the command reports an error. `wait` exits with

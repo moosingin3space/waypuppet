@@ -163,6 +163,44 @@ pub enum Settled {
     TimedOut,
 }
 
+/// Session preference for xdg-decoration negotiation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecorationPolicy {
+    /// Honor the client's preference, using server-side mode when none is set.
+    Auto,
+    /// Ask the client to draw its decorations.
+    Client,
+    /// The headless compositor owns decorations and draws no window chrome.
+    #[default]
+    Server,
+}
+
+/// The decoration mode acknowledged by a client supporting xdg-decoration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecorationMode {
+    /// Decorations are the client's responsibility.
+    Client,
+    /// Decorations are the compositor's responsibility.
+    Server,
+}
+
+/// Protocol facts and geometry for probing a window's decorations.
+/// These do not prove that the client painted a titlebar: arbitrary client
+/// pixels (and shadows) cannot be classified by the compositor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Decorations {
+    /// The session's requested policy.
+    pub policy: DecorationPolicy,
+    /// Acknowledged mode; `None` means no mode has been acknowledged.
+    pub negotiated: Option<DecorationMode>,
+    /// Root surface origin in output coordinates. Window input is relative to it.
+    pub surface_origin: Point,
+    /// Full surface-tree bounds in output coordinates, including decorations/shadows.
+    pub surface_bounds: Rect,
+}
+
 /// A window the session is hosting.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Window {
@@ -174,6 +212,8 @@ pub struct Window {
     pub app_id: Option<String>,
     /// Where the window sits on the output, and how big it is.
     pub geometry: Rect,
+    /// Decoration negotiation and observed surface geometry.
+    pub decorations: Decorations,
     /// Whether the window is mapped and has content.
     pub mapped: bool,
     /// How many frames the client has committed since it connected.

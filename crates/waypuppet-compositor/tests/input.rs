@@ -239,6 +239,16 @@ fn a_chord_that_does_not_parse_leaves_the_focus_alone() {
 fn a_click_arrives_where_it_was_aimed() {
     fixture::guarded("input-click", OUTPUT, |harness| {
         let mut client = ready(harness);
+        // This client never binds xdg-decoration. A server preference must not
+        // be reported as an observed negotiation with an unsupported client.
+        let snapshot = harness.state().snapshot();
+        let window = &snapshot.windows[0];
+        assert_eq!(window.decorations.negotiated, None);
+        assert_eq!(
+            window.decorations.policy,
+            waypuppet_proto::DecorationPolicy::Server
+        );
+        assert_eq!(window.decorations.surface_origin, window.geometry.origin);
 
         harness.deliver("a click to settle", SETTLE, |reply| Command::Click {
             at: Some(Point { x: 40, y: 30 }),

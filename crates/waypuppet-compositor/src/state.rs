@@ -21,8 +21,9 @@ use smithay::{
         renderer::utils::on_commit_buffer_handler,
     },
     delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_output,
-    delegate_primary_selection, delegate_seat, delegate_shm, delegate_xdg_shell,
-    desktop::{Space, Window},
+    delegate_primary_selection, delegate_seat, delegate_shm, delegate_xdg_decoration,
+    delegate_xdg_shell,
+    desktop::{Space, Window, WindowSurfaceType},
     input::{
         Seat, SeatHandler, SeatState,
         keyboard::FilterResult,
@@ -33,6 +34,7 @@ use smithay::{
         calloop::{
             Interest, LoopHandle, Mode as LoopMode, PostAction, RegistrationToken, generic::Generic,
         },
+        wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode as DecorationMode,
         wayland_server::{
             Client, DisplayHandle, Resource,
             backend::{ClientData, ClientId, DisconnectReason},
@@ -67,6 +69,7 @@ use smithay::{
         shell::xdg::{
             PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
             XdgToplevelSurfaceData,
+            decoration::{XdgDecorationHandler, XdgDecorationState},
         },
         shm::{ShmHandler, ShmState},
     },
@@ -383,6 +386,10 @@ pub struct State {
     pub shm_state: ShmState,
     /// `xdg_shell`, which is how a client gets a window at all.
     pub xdg_shell_state: XdgShellState,
+    /// Negotiate unadorned windows instead of toolkit fallback titlebars.
+    pub xdg_decoration_state: XdgDecorationState,
+    /// Decoration policy fixed when the session starts.
+    pub decorations: waypuppet_proto::DecorationPolicy,
     /// `wl_output` plus `xdg_output`.
     pub output_manager_state: OutputManagerState,
     /// `wl_data_device_manager`. Nothing here reads or writes a selection yet —
@@ -468,6 +475,7 @@ impl State {
         let compositor_state = CompositorState::new::<Self>(&display_handle);
         let shm_state = ShmState::new::<Self>(&display_handle, Vec::new());
         let xdg_shell_state = XdgShellState::new::<Self>(&display_handle);
+        let xdg_decoration_state = XdgDecorationState::new::<Self>(&display_handle);
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&display_handle);
         let data_device_state = DataDeviceState::new::<Self>(&display_handle);
         let primary_selection_state = PrimarySelectionState::new::<Self>(&display_handle);
@@ -545,6 +553,8 @@ impl State {
             compositor_state,
             shm_state,
             xdg_shell_state,
+            xdg_decoration_state,
+            decorations: config.decorations,
             output_manager_state,
             data_device_state,
             primary_selection_state,
@@ -663,6 +673,15 @@ impl State {
                 let record = self.records.get(surface)?;
                 let geometry = self.space.element_geometry(window)?;
                 let (title, app_id) = names(surface);
+                let root = geometry.loc - window.geometry().loc;
+                let bbox = self.space.element_bbox(window)?;
+                let negotiated = toplevel.current_state().decoration_mode.map(|mode| {
+                    if mode == DecorationMode::ServerSide {
+                        waypuppet_proto::DecorationMode::Server
+                    } else {
+                        waypuppet_proto::DecorationMode::Client
+                    }
+                });
 
                 Some(waypuppet_proto::Window {
                     id: record.id,
@@ -676,6 +695,24 @@ impl State {
                         size: waypuppet_proto::Size {
                             width: geometry.size.w.unsigned_abs(),
                             height: geometry.size.h.unsigned_abs(),
+                        },
+                    },
+                    decorations: waypuppet_proto::Decorations {
+                        policy: self.decorations,
+                        negotiated,
+                        surface_origin: Point {
+                            x: root.x,
+                            y: root.y,
+                        },
+                        surface_bounds: Rect {
+                            origin: Point {
+                                x: bbox.loc.x,
+                                y: bbox.loc.y,
+                            },
+                            size: waypuppet_proto::Size {
+                                width: bbox.size.w.unsigned_abs(),
+                                height: bbox.size.h.unsigned_abs(),
+                            },
                         },
                     },
                     mapped: record.mapped,
@@ -968,8 +1005,8 @@ impl State {
         // lands on whatever is actually drawn there.
         let under = self.space.element_under(location).and_then(|(window, at)| {
             window
-                .toplevel()
-                .map(|toplevel| (toplevel.wl_surface().clone(), at.to_f64()))
+                .surface_under(location - at.to_f64(), WindowSurfaceType::ALL)
+                .map(|(surface, offset)| (surface, (at + offset).to_f64()))
         });
 
         let event = MotionEvent {
@@ -989,10 +1026,13 @@ impl State {
             Target::Output => SmithayPoint::from((0, 0)),
             Target::Focused | Target::Window(_) => {
                 let window = self.target_window(target).ok_or(Failure::NoSuchWindow)?;
+                // AT-SPI's window coordinates describe the root surface's
+                // content. A winit titlebar may extend above it at negative y.
                 self.space
                     .element_geometry(&window)
                     .ok_or(Failure::NoSuchWindow)?
                     .loc
+                    - window.geometry().loc
             }
         };
         Ok(SmithayPoint::from((
@@ -1763,6 +1803,34 @@ impl DataDeviceHandler for State {
 
 impl OutputHandler for State {}
 
+// Server mode means an unadorned headless window; client mode preserves toolkit
+// decorations for tests. Auto honors requests and uses server mode when the
+// client has no preference. The negotiated result is observed in snapshot(),
+// separately from this policy, because clients may not bind this protocol.
+impl XdgDecorationHandler for State {
+    fn new_decoration(&mut self, toplevel: ToplevelSurface) {
+        self.request_mode(toplevel, DecorationMode::ServerSide);
+    }
+
+    fn request_mode(&mut self, toplevel: ToplevelSurface, mode: DecorationMode) {
+        let mode = match self.decorations {
+            waypuppet_proto::DecorationPolicy::Auto => mode,
+            waypuppet_proto::DecorationPolicy::Client => DecorationMode::ClientSide,
+            waypuppet_proto::DecorationPolicy::Server => DecorationMode::ServerSide,
+        };
+        toplevel.with_pending_state(|state| {
+            state.decoration_mode = Some(mode);
+        });
+        if toplevel.is_initial_configure_sent() {
+            toplevel.send_pending_configure();
+        }
+    }
+
+    fn unset_mode(&mut self, toplevel: ToplevelSurface) {
+        self.request_mode(toplevel, DecorationMode::ServerSide);
+    }
+}
+
 impl XdgShellHandler for State {
     fn xdg_shell_state(&mut self) -> &mut XdgShellState {
         &mut self.xdg_shell_state
@@ -1846,3 +1914,4 @@ delegate_shm!(State);
 delegate_seat!(State);
 delegate_output!(State);
 delegate_xdg_shell!(State);
+delegate_xdg_decoration!(State);
