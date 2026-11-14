@@ -1,0 +1,10 @@
+[package]
+name = "freya-waypuppet-052"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+freya = { version = "=0.5.2", features = ["engine"] }
+
+# Keep Skia and the real toolkit out of the compositor's unit-test workspace.
+[workspace]

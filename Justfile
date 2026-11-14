@@ -136,3 +136,7 @@ release:
 [doc("Check a binary against the distribution ABI baseline.")]
 abi binary="ci/release/waypuppet":
     ci/abi-baseline.sh {{ binary }}
+
+# Keep the real Freya/Skia dependency separate from the fast workspace suite.
+[doc("Drive Freya 0.5.2 under waypuppet and verify a selector activates a button.")]
+freya: (sdk "sh ci/freya-smoke.sh")
