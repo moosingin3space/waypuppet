@@ -155,6 +155,10 @@ A `v*` tag also publishes the archive and `SHA256SUMS`, after checking that the 
 matches the workspace version. `Cargo.lock` is committed so releases use the same
 dependency versions as CI.
 
+If the release already exists (for example, it was published in the GitHub UI),
+the workflow uploads the assets to it and preserves its notes. Reruns replace assets
+of the same name. Otherwise, the workflow creates the release with generated notes.
+
 After publication, a separate job runs the commit-pinned
 [Packslip action](https://packslip.dev/docs/publishing/) against the uploaded archive.
 It records the executable, inferred platform and host libraries, and the agent skill

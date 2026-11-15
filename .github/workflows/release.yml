@@ -124,12 +124,21 @@ jobs:
           cat SHA256SUMS
 
       # `--verify-tag` refuses to invent a tag that does not exist, which is the failure
-      # mode of publishing from a typo.
-      - name: Create the release
+      # mode of publishing from a typo. A release created in the GitHub UI already
+      # exists when its tag triggers this workflow; upload to it instead of recreating it.
+      - name: Publish the release assets
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null; then
+            gh release upload "$GITHUB_REF_NAME" \
+              dist/waypuppet-*.tar.gz dist/SHA256SUMS \
+              --repo "$GITHUB_REPOSITORY" --clobber
+            exit 0
+          fi
+
           gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --generate-notes \
             --notes-file - \
