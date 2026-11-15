@@ -2114,7 +2114,7 @@ dependencies = [
 
 [[package]]
 name = "waypuppet"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "clap",
  "serde_json",
@@ -2131,7 +2131,7 @@ dependencies = [
 
 [[package]]
 name = "waypuppet-compositor"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "atspi",
  "busd",
@@ -2158,7 +2158,7 @@ dependencies = [
 
 [[package]]
 name = "waypuppet-fingerprint"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "arbtest",
  "sha2",
@@ -2166,7 +2166,7 @@ dependencies = [
 
 [[package]]
 name = "waypuppet-proto"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "tarpc",
@@ -2175,7 +2175,7 @@ dependencies = [
 
 [[package]]
 name = "waypuppet-sandbox"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "arbtest",
  "serde",
@@ -2186,7 +2186,7 @@ dependencies = [
 
 [[package]]
 name = "waypuppet-select"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "arbtest",
  "waypuppet-proto",
