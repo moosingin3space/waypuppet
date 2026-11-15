@@ -1,6 +1,6 @@
 name: release
 
-# Two jobs and two triggers, and the split matters.
+# The build runs on every change; publishing and signing run only on version tags.
 #
 # `abi` runs on every push and pull request, because the properties it checks are ones a
 # test suite cannot see: a binary that needs a newer glibc, or that has picked up a
@@ -156,3 +156,50 @@ jobs:
           `--expect` checks it. A release may move the render epoch; when it does, the
           fingerprint changes and says so, which is the point.
           NOTES
+
+  packslip:
+    name: sign the release for Packslip
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      # Keep signing in this workflow: consumers pin its identity across releases.
+      # Packslip reads the finished archive from the release and has no release write
+      # access. It infers the platform and host libraries from the archive and ELF.
+      - uses: jdx/packslip@e0340e0c1d10c90a434de2b90f3a1ba345923564 # v1.11.4
+        id: packslip
+        with:
+          download: waypuppet-${{ github.ref_name }}-x86_64-linux.tar.gz
+          bin: waypuppet
+          resources: skill/waypuppet=repo:skills/waypuppet
+          upload: false
+
+      - name: Stage the signed bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: packslip-bundle
+          path: ${{ steps.packslip.outputs.bundle }}
+          if-no-files-found: error
+
+  publish-packslip:
+    name: attach the Packslip bundle
+    needs: packslip
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: packslip-bundle
+          path: packslip
+
+      - name: Upload the signed bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test -f packslip/packslip.sigstore.json
+          gh release upload "$GITHUB_REF_NAME" packslip/packslip.sigstore.json \
+            --repo "$GITHUB_REPOSITORY" --clobber

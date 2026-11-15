@@ -6,6 +6,19 @@ inspect an application or automate GUI tests.
 
 ## Install
 
+With [mise](https://mise.jdx.dev), install the x86-64 Linux binary through its
+[Packslip backend](https://packslip.dev/docs/mise/):
+
+```sh
+mise use -g packslip:github.com/moosingin3space/waypuppet
+waypuppet doctor
+```
+
+This requires a release carrying `packslip.sigstore.json`; releases made before
+Packslip support was added need the archive installation below. Omit `-g` to record
+waypuppet in a project's `mise.toml`. To link the matching agent skill into that
+project, run `mise skills sync --dir .agents/skills` after installation.
+
 Download the x86-64 Linux archive from the [releases page]. Extract it, install the
 binary, and check the available runtime:
 

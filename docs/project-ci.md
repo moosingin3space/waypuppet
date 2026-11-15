@@ -149,12 +149,31 @@ the same class of failure today.
 
 ## Releasing
 
-Not urgent, but the shape:
+The [release workflow](../.github/workflows/release.yml) builds the distributable
+x86-64 Linux binary and checks its ABI on every push to main and pull request.
+A `v*` tag also publishes the archive and `SHA256SUMS`, after checking that the tag
+matches the workspace version. `Cargo.lock` is committed so releases use the same
+dependency versions as CI.
 
-- The CLI as a static-ish binary per platform, since the point is to drop it into somebody
-  else's container.
-- Optionally a Flatpak bundle, which is the packaging alternative discussed in
-  [plan 08](../plans/08-sandbox-autonomy.md) — attractive for distribution, wrong for the
-  inner loop.
-- `Cargo.lock` is committed. Keep it that way: this is a binary, and a reproducible build
-  is worth more than automatic dependency currency.
+After publication, a separate job runs the commit-pinned
+[Packslip action](https://packslip.dev/docs/publishing/) against the uploaded archive.
+It records the executable, inferred platform and host libraries, and the agent skill
+at the release's source commit. GitHub OIDC signs the bundle and GitHub artifact
+attestations record provenance. This job has read access to releases; a final job
+with write access attaches `packslip.sigstore.json`. mise can then verify and install
+the release using `packslip:github.com/moosingin3space/waypuppet`.
+
+Keep signing in `release.yml` so consumers retain the same workflow identity across
+upgrades. After the first signed release, download its bundle and archive from the
+release page and verify them with the Packslip CLI:
+
+```sh
+packslip verify packslip.sigstore.json --artifact waypuppet-vX.Y.Z-x86_64-linux.tar.gz
+packslip show packslip.sigstore.json
+packslip pin packslip.sigstore.json
+```
+
+Check the project, version, platform and executable path, then publish the verified
+signer fingerprint in the README so users can pin it independently of release assets.
+The first signature must come from the release workflow; a local test key cannot
+establish that fingerprint.
